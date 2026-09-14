@@ -57,6 +57,7 @@ from merge_parts import (
 from pipeline import (  # noqa: F401 — GRANULARITY / DEFAULT_* are the public contract
     DEFAULT_AZIMUTH, DEFAULT_AZIMUTH_JITTER, DEFAULT_COMPLETE, DEFAULT_CONCEPT_BANK,
     DEFAULT_CONDITION, DEFAULT_FLAT_PAINT, DEFAULT_GRANULARITY, DEFAULT_MERGE,
+    DEFAULT_PROMPTS, DEFAULT_UNASSIGNED_TO,
     DEFAULT_FRAGMENT_SHARE, DEFAULT_MIN_AREA_SHARE, DEFAULT_MIRROR, DEFAULT_OCTREE_RESOLUTION, DEFAULT_RADIUS,
     DEFAULT_REDRAWS, DEFAULT_RESOLUTION, DEFAULT_SAM3_THRESHOLD, DEFAULT_SAMPLES,
     DEFAULT_SEED, DEFAULT_TEXTURE_SIZE, DEFAULT_VIEW_AZIMUTHS, DEFAULT_VIEW_ELEVATIONS,
@@ -64,7 +65,9 @@ from pipeline import (  # noqa: F401 — GRANULARITY / DEFAULT_* are the public 
     DEFAULT_XPART_ROOT, DEFAULT_XPART_WEIGHTS, GRANULARITY,
     PipelineOptions, add_cli_arguments, check_cli, floors,
 )
-from prompt_specs import normalize_part_specs, split_prompt_entries
+from prompt_specs import (
+    normalize_part_specs, part_names, resolve_unassigned_to, split_prompt_entries,
+)
 from segment_api import DEFAULT_PY_SAM3, DEFAULT_SAM3, DEFAULT_TRANSFORMS, _run
 
 DEFAULT_CKPT = os.path.join(ROOT, "ckpt", "full_seg.ckpt")
@@ -121,7 +124,7 @@ def segment_parts(
     sam3_threshold=DEFAULT_SAM3_THRESHOLD,
     concept_bank=DEFAULT_CONCEPT_BANK,
     flat_paint=DEFAULT_FLAT_PAINT,
-    unassigned_to=None,
+    unassigned_to=DEFAULT_UNASSIGNED_TO,
     merge=DEFAULT_MERGE,
     complete=DEFAULT_COMPLETE,
     py_xpart=None,
@@ -145,9 +148,8 @@ def segment_parts(
 
     Args:
         prompts: one entry per output part; join concepts with '+' to merge them into one
-            part, optionally under a name ("body=head+face+hand"). Empty prompts skip
-            naming: each geometric unit is exported and still repaired. The split then
-            uses granularity=fine unless a floor was set.
+            part, optionally under a name ("body=head+face+hand"). Empty prompts become
+            主体 / 底座 so SAM3 still names a body and a base.
         samples: how many full_seg samples to intersect. 1 reproduces the old single-sample
             behaviour. What more samples buy is not a finer split but a less lucky one.
             One draw of 5 left Mickey with 13 atoms, the largest covering 48% of the
@@ -174,16 +176,16 @@ def segment_parts(
         mirror: "auto" also intersects each sample reflected across the model's symmetry
             plane, if it has one -- full_seg often cuts a joint on one side only.
         merge: "off" writes one node per unit; "name", "unit" and "fragments" hand
-            over to merge_parts.py (see its `merge`). Empty prompts force merge="off"
-            unless merge is already "fragments" (keep the split, fold specks only).
-            Guidance overlays are written only when prompts were given.
+            over to merge_parts.py (see its `merge`). Empty prompts fill 主体 / 底座
+            and keep the requested merge. Guidance overlays follow the filled prompts.
         fragment_share: with merge=fragments, a unit below this share of the surface
             is a speck. Smaller keeps more pieces.
         flat_paint: "auto" gives a model the renders show as grey a temporary flat colour
             before prompting; "off" always prompts on the render as it is.
         view_azimuths / view_elevations / radius / resolution: the grid SAM3 votes over.
             No per-model front view is needed, which is the point of voting across views.
-        unassigned_to: name of the part absorbing units no concept claimed. Without it
+        unassigned_to: name of the part absorbing units no concept claimed
+            (default body). Without it, or if the name is not in the prompts,
             those faces are dropped from the output.
         with_texture: bake the source albedo onto each part (needs bpy); off gives each
             part a flat placeholder colour instead.
@@ -200,8 +202,11 @@ def segment_parts(
 
     if samples < 1:
         raise ValueError(f"samples must be at least 1, got {samples}")
-    merge, granularity = resolve_unprompted(
+    prompts, merge, granularity = resolve_unprompted(
         prompts, merge, granularity, min_atom_faces, min_unit_faces)
+    if split_prompt_entries(prompts):
+        unassigned_to = resolve_unassigned_to(
+            unassigned_to, part_names(normalize_part_specs(prompts)))
 
     glb = os.path.abspath(glb)
     out_glb = os.path.abspath(out_glb)
@@ -323,22 +328,11 @@ def segment_parts(
 
 def resolve_unprompted(prompts, merge, granularity, min_atom_faces=None,
                        min_unit_faces=None):
-    """No prompts: keep the geometric split and use the finest named floors.
-
-    Language only names. An empty prompt list cannot vote, so `name` / `unit` become
-    `off`. `fragments` stays: it does not need names. The finest preset is `fine`
-    (150/300); an explicit granularity or floor wins.
-    """
+    """Empty prompts become 主体 / 底座. Merge and granularity stay as requested."""
     if split_prompt_entries(prompts):
-        return merge, granularity
-    if merge in ("name", "unit"):
-        print("[split] no prompts; merge=off (one node per geometric unit)")
-        merge = "off"
-    if (min_atom_faces is None and min_unit_faces is None
-            and granularity == DEFAULT_GRANULARITY):
-        print("[split] no prompts; granularity=fine")
-        granularity = "fine"
-    return merge, granularity
+        return prompts, merge, granularity
+    print("[split] no prompts; using 主体, 底座")
+    return list(DEFAULT_PROMPTS), merge, granularity
 
 
 def main():
@@ -350,7 +344,7 @@ def main():
     parser.add_argument("--prompts", nargs="+", default=[],
                         help="One comma-separated sentence: 'head, torso, arm'. "
                              "Spaces inside a name are kept. '+' still merges concepts "
-                             "('body=head+face'). Empty = unnamed fine units, then repair.")
+                             "('body=head+face'). Empty = 主体, 底座.")
     parser.add_argument("--out", required=True, help="Output glb, one node per part")
     parser.add_argument("--work_dir", default=None,
                         help="Keep intermediates here. Default: work_parts/ next to --out.")

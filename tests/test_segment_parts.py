@@ -15,25 +15,29 @@ def grid_adjacency(count):
 
 
 class UnpromptedTest(unittest.TestCase):
-    def test_empty_prompts_force_unnamed_fine_units(self):
-        merge, granularity = resolve_unprompted("", "name", "medium")
-        self.assertEqual(merge, "off")
-        self.assertEqual(granularity, "fine")
+    def test_empty_prompts_become_body_and_base(self):
+        prompts, merge, granularity = resolve_unprompted("", "name", "medium")
+        self.assertEqual(list(prompts), ["主体", "底座"])
+        self.assertEqual(merge, "name")
+        self.assertEqual(granularity, "medium")
 
     def test_an_explicit_granularity_is_kept_when_prompts_are_empty(self):
-        merge, granularity = resolve_unprompted([], "off", "coarse")
+        prompts, merge, granularity = resolve_unprompted([], "off", "coarse")
+        self.assertEqual(list(prompts), ["主体", "底座"])
         self.assertEqual(merge, "off")
         self.assertEqual(granularity, "coarse")
 
     def test_prompts_leave_merge_and_granularity_alone(self):
-        merge, granularity = resolve_unprompted("head, torso", "name", "medium")
+        prompts, merge, granularity = resolve_unprompted("head, torso", "name", "medium")
+        self.assertEqual(prompts, "head, torso")
         self.assertEqual(merge, "name")
         self.assertEqual(granularity, "medium")
 
     def test_empty_prompts_keep_an_explicit_fragments_merge(self):
-        merge, granularity = resolve_unprompted("", "fragments", "medium")
+        prompts, merge, granularity = resolve_unprompted("", "fragments", "medium")
+        self.assertEqual(list(prompts), ["主体", "底座"])
         self.assertEqual(merge, "fragments")
-        self.assertEqual(granularity, "fine")
+        self.assertEqual(granularity, "medium")
 
 
 class SampleAzimuthsTest(unittest.TestCase):

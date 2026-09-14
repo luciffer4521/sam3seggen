@@ -57,6 +57,20 @@ def part_names(specs: Sequence[PartSpec]) -> list[str]:
     return [name for name, _ in specs]
 
 
+def resolve_unassigned_to(target: str | None, expected_names: Sequence[str]) -> str | None:
+    """Keep `target` only when it names a requested component.
+
+    The default is `body`. Requests whose prompts do not include that name
+    (or a Swagger leftover like `string`) drop the catch-all instead of failing.
+    """
+    if not target or target == "string":
+        return None
+    if target not in expected_names:
+        print(f"[split] unassigned_to={target!r} is not in {list(expected_names)}; ignored")
+        return None
+    return target
+
+
 def validate_target_name(target: str | None, expected_names: Sequence[str]) -> None:
     if target is not None and target not in expected_names:
         raise ValueError(

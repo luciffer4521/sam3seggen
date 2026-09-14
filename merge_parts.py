@@ -36,11 +36,14 @@ from pipeline import (
     DEFAULT_CONCEPT_BANK, DEFAULT_HOLOPART_ROOT, DEFAULT_HOLOPART_WEIGHTS,
     DEFAULT_FRAGMENT_SHARE, DEFAULT_MIN_AREA_SHARE, DEFAULT_OCTREE_RESOLUTION, DEFAULT_PY_HOLOPART,
     DEFAULT_PY_XPART, DEFAULT_RADIUS, DEFAULT_REDRAWS, DEFAULT_RESOLUTION,
-    DEFAULT_SAM3_THRESHOLD, DEFAULT_TEXTURE_SIZE, DEFAULT_VIEW_AZIMUTHS,
-    DEFAULT_VIEW_ELEVATIONS, DEFAULT_XPART_ROOT, DEFAULT_XPART_WEIGHTS,
+    DEFAULT_SAM3_THRESHOLD, DEFAULT_TEXTURE_SIZE, DEFAULT_UNASSIGNED_TO,
+    DEFAULT_VIEW_AZIMUTHS, DEFAULT_VIEW_ELEVATIONS, DEFAULT_XPART_ROOT, DEFAULT_XPART_WEIGHTS,
     FLAT_PAINT_MODES, MERGE_MODES, PipelineOptions, add_cli_arguments, check_cli,
 )
-from prompt_specs import normalize_part_specs, part_names, validate_named_rows, validate_target_name
+from prompt_specs import (
+    normalize_part_specs, part_names, resolve_unassigned_to,
+    validate_named_rows, validate_target_name,
+)
 from segment_api import DEFAULT_PY_SAM3, DEFAULT_SAM3, _run
 
 
@@ -254,7 +257,7 @@ def merge_parts(
     out_glb,
     mesh=None,
     atoms=None,
-    unassigned_to=None,
+    unassigned_to=DEFAULT_UNASSIGNED_TO,
     merge="name",
     min_unit_faces=None,
     min_recall=None,
@@ -323,6 +326,7 @@ def merge_parts(
         raise ValueError(f"merge must be one of {MERGE_MODES}, got {merge!r}")
     specs = normalize_part_specs(prompts)
     expected_names = part_names(specs)
+    unassigned_to = resolve_unassigned_to(unassigned_to, expected_names)
     validate_target_name(unassigned_to, expected_names)
     prompt_list = canonical_prompts(specs)
 

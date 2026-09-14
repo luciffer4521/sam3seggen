@@ -3,6 +3,7 @@ import unittest
 from prompt_specs import (
     normalize_part_specs,
     part_names,
+    resolve_unassigned_to,
     split_prompt_entries,
     validate_named_rows,
     validate_part_coverage,
@@ -69,6 +70,12 @@ class PromptSpecsTest(unittest.TestCase):
         validate_target_name("wall", ["roof", "opening", "wall"])
         with self.assertRaisesRegex(ValueError, "unassigned_to"):
             validate_target_name("body", ["roof", "opening", "wall"])
+
+    def test_default_body_is_kept_only_when_prompted(self):
+        self.assertEqual(resolve_unassigned_to("body", ["head", "body", "leg"]), "body")
+        self.assertIsNone(resolve_unassigned_to("body", ["主体", "底座"]))
+        self.assertIsNone(resolve_unassigned_to("string", ["head", "tail", "legs"]))
+        self.assertIsNone(resolve_unassigned_to("", ["head", "body"]))
 
     def test_named_rows_must_match_dynamic_request_exactly(self):
         validate_named_rows(

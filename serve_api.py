@@ -34,10 +34,13 @@ import threading
 import time
 import uuid
 import zipfile
+from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BeforeValidator
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
@@ -58,6 +61,44 @@ JOB_ID = re.compile(r"\A[0-9a-f]{32}\Z")
 
 _gpu = threading.Lock()
 app = FastAPI(title="SegviGen part splitter", version="1", description=__doc__)
+
+# /docs leaves the schema type name in empty optional boxes. Treat those as omitted.
+_FORM_PLACEHOLDERS = ("", "string", "integer", "number", "null")
+
+
+def blank_as_none(value):
+    if value in (None, * _FORM_PLACEHOLDERS):
+        return None
+    return value
+
+
+def parse_optional_int(value):
+    value = blank_as_none(value)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"expected an integer, got {value!r}") from exc
+
+
+def parse_optional_float(value):
+    value = blank_as_none(value)
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(400, f"expected a number, got {value!r}") from exc
+
+
+OptionalStr = Annotated[str | None, BeforeValidator(blank_as_none)]
+
+
+@app.exception_handler(RequestValidationError)
+async def _invalid_form(request: Request, exc: RequestValidationError):
+    print(f"{request.method} {request.url.path} 422 {exc.errors()}")
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 def _job_dir(job_id: str) -> str:
@@ -174,21 +215,22 @@ async def segment(
         default="",
         description="One comma-separated sentence of part names, e.g. "
                     "'head, torso, arm'. Spaces inside a name are kept. "
-                    "'body=head+face' still merges concepts. Empty = unnamed "
-                    "units at fine granularity, then hybrid repair."),
-    unassigned_to: str | None = Form(
-        None, description="Part that absorbs units no concept claimed."),
+                    "'body=head+face' still merges concepts. Empty = 主体, 底座."),
+    unassigned_to: OptionalStr = Form(
+        _DEFAULTS.unassigned_to,
+        description="Part that absorbs units no concept claimed "
+                    "(default body). Must be one of the prompts, or it is ignored."),
     samples: int = Form(_DEFAULTS.samples),
     azimuth: float = Form(_DEFAULTS.azimuth),
     azimuth_jitter: float = Form(_DEFAULTS.azimuth_jitter),
     granularity: str = Form(
         _DEFAULTS.granularity,
         description="fine 150/300 | medium 300/600 | coarse 800/1600. An explicit floor wins."),
-    min_atom_faces: int | None = Form(None),
-    min_unit_faces: int | None = Form(None),
-    color_tol: float | None = Form(None),
+    min_atom_faces: str | None = Form(None),
+    min_unit_faces: str | None = Form(None),
+    color_tol: str | None = Form(None),
     mirror: str = Form(_DEFAULTS.mirror, description=" | ".join(MIRROR_MODES)),
-    min_recall: float | None = Form(None),
+    min_recall: str | None = Form(None),
     view_azimuths: str = Form(_DEFAULTS.view_azimuths),
     view_elevations: str = Form(_DEFAULTS.view_elevations),
     radius: float = Form(_DEFAULTS.radius),
@@ -221,7 +263,7 @@ async def segment(
                     "bake at 2× / 4× this, capped at 8192."),
     reuse: bool = Form(_DEFAULTS.reuse),
     sam3_threshold: float = Form(_DEFAULTS.sam3_threshold),
-    concept_bank: str | None = Form(None),
+    concept_bank: OptionalStr = Form(None),
     no_concept_bank: bool = Form(False),
     allow_partial: bool = Form(
         True, description="Skip a prompt SAM3 never saw and finish the rest (default). "
@@ -243,6 +285,10 @@ async def segment(
         raise HTTPException(400, f"mirror must be one of {MIRROR_MODES}")
     if no_concept_bank and concept_bank:
         raise HTTPException(400, "pass either concept_bank or no_concept_bank, not both")
+    min_atom_faces = parse_optional_int(min_atom_faces)
+    min_unit_faces = parse_optional_int(min_unit_faces)
+    color_tol = parse_optional_float(color_tol)
+    min_recall = parse_optional_float(min_recall)
     options = PipelineOptions.from_mapping({
         "unassigned_to": unassigned_to,
         "samples": samples,

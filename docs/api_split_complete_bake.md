@@ -43,18 +43,18 @@ curl -X POST "$HOST/segment" \
 
 不传 `complete` 就是 `hybrid`。只要拆不要修：`-F "complete=off"`。只要 X-Part：`-F "complete=full"`。
 
-`prompts` 是**一句逗号分隔**的部件名（中文逗号、顿号也行）。名字里可以有空格。`body=head+face` 仍把多个概念收成一个输出节点。不传则按最细粒度拆成匿名单元并修复。布尔字段按 multipart 传 `true` / `false`。
+`prompts` 是**一句逗号分隔**的部件名（中文逗号、顿号也行）。名字里可以有空格。`body=head+face` 仍把多个概念收成一个输出节点。不传则默认提示词是 **主体、底座**（`merge` / `granularity` 仍用请求值，默认 `name` / `medium`）。布尔字段按 multipart 传 `true` / `false`。`/docs` 里没填的可选框不要留着灰色的 `string`；服务会把 `string` / 空数字当成没传，否则 FastAPI 会直接 **422**。
 
 ### 不写提示词
 
-可以。不传 `prompts` 就按几何单元拆（`merge=off`），粒度自动变成最细的 `fine`（150/300），然后照常混合修复。要头/躯干这种名字才需要写提示词。
+可以。不传 `prompts` 就按 **主体 / 底座** 去命名，再走默认 `complete=hybrid`。要头/躯干这种更细的名字才需要自己写提示词。
 
 ```sh
 curl -X POST "$HOST/segment" --max-time 3600 \
   -F "glb=@model.glb"
 ```
 
-得到匿名单元：`unit_00`、`unit_01`…，再走默认 `complete=hybrid`。只要拆不修：再加 `-F "complete=off"`。显式 `-F "granularity=coarse"` 会覆盖自动的 `fine`。
+得到 `主体`、`底座` 两个名字（`merge=name` 时同名会焊成一块）。只要拆不修：再加 `-F "complete=off"`。显式 `-F "merge=off"` 才按几何单元出匿名件。
 
 成功响应里看这些字段：
 
@@ -124,9 +124,9 @@ $JOBS_DIR/{job_id}/
   complete/decisions.json            # GET /complete_decisions
 ```
 
-有提示词时，`xpart_parts.glb` 的节点和 `parts.glb` 对齐：按名字收成一组的独立件（两只手）先拆成实例生成，再合并回组。不写提示词时每个 `unit_NN` 就是一个实例，不再并组。
+有提示词时，`xpart_parts.glb` 的节点和 `parts.glb` 对齐：按名字收成一组的独立件（两只手）先拆成实例生成，再合并回组。不写提示词时按 **主体 / 底座** 命名，和写了这两个词一样。
 
-响应里的 `options` 是请求字段的默认快照；不传 `prompts` 时它仍可能写着 `merge=name` / `granularity=medium`，实际跑的是 `off` / `fine`。看日志里的 `[split] no prompts` 或产物节点名。
+响应里的 `options` 是请求字段的默认快照。不传 `prompts` 时看日志里的 `[split] no prompts; using 主体, 底座`。
 
 ## Python / CLI 等价调用
 
@@ -165,7 +165,7 @@ python segment_parts.py \
   --merge name --condition surface
 ```
 
-CLI 里跳过烘焙写 `--no_texture`（没有 `--with_texture` 这种正向 flag）。HTTP / Python 则是 `with_texture=false`。只要拆不修：`--complete off`。不写提示词：省略 `--prompts`（自动 `merge=off` + `granularity=fine` + 混合修复）。
+CLI 里跳过烘焙写 `--no_texture`（没有 `--with_texture` 这种正向 flag）。HTTP / Python 则是 `with_texture=false`。只要拆不修：`--complete off`。不写提示词：省略 `--prompts`（自动填 **主体、底座**，`merge` / 粒度仍用默认）。
 
 ```sh
 python segment_parts.py --glb model.glb --out out/parts.glb --work_dir out/work
@@ -181,13 +181,13 @@ python segment_parts.py --glb model.glb --out out/parts.glb --work_dir out/work
 
 | 开关 | HTTP / Python | CLI | 默认 | 作用 |
 |---|---|---|---|---|
-| `merge` | `name` / `unit` / `fragments` / `off` | 同左 | `name` | `name`：每个提示词一个节点，同名大件会焊在一起。`unit`：每个投票单元一个节点，用来定位是谁取错名。`fragments`：按几何切开留下，只把碎屑折回邻件（门槛是 `fragment_share`）。`off`：不命名，每个几何单元一个节点，**仍然修复**。不传 `prompts` 时 `name`/`unit` 会变成 `off`；显式 `fragments` 会保留。 |
+| `merge` | `name` / `unit` / `fragments` / `off` | 同左 | `name` | `name`：每个提示词一个节点，同名大件会焊在一起。`unit`：每个投票单元一个节点，用来定位是谁取错名。`fragments`：按几何切开留下，只把碎屑折回邻件（门槛是 `fragment_share`）。`off`：不命名，每个几何单元一个节点，**仍然修复**。不传 `prompts` 时填 **主体、底座**，`merge` 保持请求值。 |
 | `fragment_share` | float | `--fragment_share` | `0.01` | 只在 `merge=fragments` 生效：面积低于表面这么多的单元才算碎屑。更小更碎、保留更多件；更大折得更狠。`0` 等于不折。独立名字的小件（按钮、耳朵）仍会留下。 |
 | `complete` | `off` / `boxes` / `full` / `hybrid` | 同左 | `hybrid` | `off`：不修复。`boxes`：只写盒子提示和预览，不占 GPU。`full`：只跑 X-Part 再烘。`hybrid`：X-Part 之后，大件超框换成 HoloPart，再烘。 |
 | `with_texture` | `true` / `false` | `--no_texture` 关掉 | `true` | 开口件和封闭实体都走 Blender 重 UV + selected-to-active 烘焙。关掉则部件只给占位色，不需要 bpy。**这不表示源模型有没有贴图**，只表示要不要烘。 |
 | `texture_size` | int | `--texture_size` | `2048` | **小件**底图边长。面积 ≥ 8% 升到 2×（默认 4096），≥ 40% 升到 4×（默认 8192），封顶 8192。贴图按 PNG 打进 GLB。 |
 
-一条龙有提示词：`merge=name` + `complete=hybrid` + `with_texture=true`。觉得同名焊得太狠：`-F "merge=fragments"`，再用 `-F "fragment_share=0.02"` 调折回门槛。不写提示词：自动 `merge=off` + `granularity=fine`，修复照常。
+一条龙有提示词：`merge=name` + `complete=hybrid` + `with_texture=true`。觉得同名焊得太狠：`-F "merge=fragments"`，再用 `-F "fragment_share=0.02"` 调折回门槛。不写提示词：自动 **主体、底座**，`merge=name`，粒度仍是 `medium`。
 
 ### 拆分（几何边界）
 
@@ -204,8 +204,8 @@ python segment_parts.py --glb model.glb --out out/parts.glb --work_dir out/work
 
 | 开关 | 默认 | 作用 |
 |---|---|---|
-| `prompts` | 可空 | 输出节点名。空 = 匿名单元 + `fine` 拆分 + 照常修复。`name=concept+concept` 合并概念。 |
-| `unassigned_to` | 无 | 没有任何掩码认领的单元并进这个名字。必须是 `prompts` 里已有的名。不设则这些面从输出丢掉。 |
+| `prompts` | 可空 | 输出节点名。空 = **主体、底座**。`name=concept+concept` 合并概念。 |
+| `unassigned_to` | `body` | 没有任何掩码认领的单元并进这个名字。必须是 `prompts` 里已有的名（默认 `body`）；不在名单里或传空则这些面从输出丢掉。Swagger 占位符 `string` 当成没填。 |
 | `flat_paint` | `auto` | 无色渲染先平涂再给 SAM3。见下一节。 |
 | `min_recall` | `0.5` | 一张掩码至少盖住单元这么多像素才认领它。 |
 | `view_azimuths` × `view_elevations` | `45,225` × `10` | SAM3 投票视角。正对 90° 容易漏胸口；抬太高躯干会挡住腿脚。 |
@@ -306,11 +306,11 @@ for mesh in meshes:
 
 ## 推荐的一条龙取值
 
-不写提示词（最细拆 + 混合修复）：
+不写提示词（主体 / 底座 + 混合修复）：
 
 ```
 # 只上传 glb，其余用默认
-# 实际生效：merge=off，granularity=fine，complete=hybrid
+# 实际生效：prompts=主体, 底座，merge=name，granularity=medium，complete=hybrid
 ```
 
 有名字的中等部件、可能无贴图：

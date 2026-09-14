@@ -56,6 +56,8 @@ DEFAULT_RESOLUTION = 512
 DEFAULT_SAM3_THRESHOLD = 0.4            # BANK_THRESHOLD; 0.3 is the no-bank painter
 DEFAULT_FLAT_PAINT = "auto"
 DEFAULT_MERGE = "name"
+DEFAULT_PROMPTS = ("主体", "底座")
+DEFAULT_UNASSIGNED_TO = "body"
 DEFAULT_COMPLETE = "hybrid"
 DEFAULT_CONDITION = "surface"
 DEFAULT_MIN_AREA_SHARE = 0.005
@@ -100,7 +102,7 @@ class PipelineOptions:
     Paths (`glb`, `out`, `work_dir`, `split`) stay on the call, not here: they change
     every run. Everything that configures *how* the pipeline runs lives on this object.
     """
-    unassigned_to: str | None = None
+    unassigned_to: str | None = DEFAULT_UNASSIGNED_TO
     samples: int = DEFAULT_SAMPLES
     azimuth: float = DEFAULT_AZIMUTH
     azimuth_jitter: float = DEFAULT_AZIMUTH_JITTER
@@ -159,6 +161,7 @@ class PipelineOptions:
                    if f.name not in ("py_xpart", "xpart_root", "xpart_weights",
                                      "py_holopart", "holopart_root",
                                      "holopart_weights", "concept_bank")},
+                "prompts": list(DEFAULT_PROMPTS),
                 "min_atom_faces": atom,
                 "min_unit_faces": unit,
                 "color_tol": DEFAULT_COLOR_TOL if self.color_tol is None else self.color_tol,
@@ -224,8 +227,14 @@ class PipelineOptions:
             kwargs["strict_parts"] = bool(payload.pop("strict_parts"))
         elif "allow_partial" in payload:
             kwargs["strict_parts"] = not bool(payload.pop("allow_partial"))
-        if payload.get("unassigned_to") == "":
-            payload["unassigned_to"] = None
+        if payload.get("concept_bank") in ("", "string"):
+            payload.pop("concept_bank")
+        if "unassigned_to" in payload:
+            raw = payload.pop("unassigned_to")
+            if raw == "":
+                kwargs["unassigned_to"] = None
+            elif raw not in (None, "string"):
+                kwargs["unassigned_to"] = raw
         for key, value in payload.items():
             if key in known and key not in kwargs and value is not None:
                 kwargs[key] = value
@@ -237,7 +246,10 @@ class PipelineOptions:
         concept_bank = "" if getattr(args, "no_concept_bank", False) else getattr(
             args, "concept_bank", DEFAULT_CONCEPT_BANK)
         return cls(
-            unassigned_to=getattr(args, "unassigned_to", None),
+            unassigned_to=(
+                None if getattr(args, "unassigned_to", DEFAULT_UNASSIGNED_TO) == ""
+                else getattr(args, "unassigned_to", DEFAULT_UNASSIGNED_TO)
+            ),
             samples=getattr(args, "samples", DEFAULT_SAMPLES),
             azimuth=getattr(args, "azimuth", DEFAULT_AZIMUTH),
             azimuth_jitter=getattr(args, "azimuth_jitter", DEFAULT_AZIMUTH_JITTER),
@@ -303,8 +315,9 @@ def add_cli_arguments(parser, *, split=True, merge_off=True):
     parser.add_argument("--view_elevations", default=DEFAULT_VIEW_ELEVATIONS)
     parser.add_argument("--radius", type=float, default=DEFAULT_RADIUS)
     parser.add_argument("--resolution", type=int, default=DEFAULT_RESOLUTION)
-    parser.add_argument("--unassigned_to", default=None,
-                        help="Part that absorbs units no concept claimed")
+    parser.add_argument("--unassigned_to", default=DEFAULT_UNASSIGNED_TO,
+                        help="Part that absorbs units no concept claimed "
+                             f"(default {DEFAULT_UNASSIGNED_TO}). Empty disables.")
     merge_choices = MERGE_MODES_ALL if merge_off else MERGE_MODES
     parser.add_argument("--merge", default=DEFAULT_MERGE, choices=merge_choices,
                         help="name = one node per prompt. unit = one node per voted unit. "

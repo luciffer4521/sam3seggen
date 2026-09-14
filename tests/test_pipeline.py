@@ -11,6 +11,7 @@ from data_toolkit.unit_vote import DEFAULT_MIN_UNIT_FACES
 from pipeline import (
     DEFAULT_COLOR_TOL, DEFAULT_COMPLETE, DEFAULT_CONDITION, DEFAULT_FLAT_PAINT,
     DEFAULT_FRAGMENT_SHARE, DEFAULT_GRANULARITY, DEFAULT_MERGE, DEFAULT_MIN_AREA_SHARE, DEFAULT_MIN_RECALL,
+    DEFAULT_PROMPTS, DEFAULT_UNASSIGNED_TO,
     DEFAULT_REDRAWS, DEFAULT_SAM3_THRESHOLD, DEFAULT_SAMPLES, GRANULARITY,
     PipelineOptions, add_cli_arguments, check_cli, floors,
 )
@@ -49,6 +50,11 @@ class PipelineDefaultsTest(unittest.TestCase):
         self.assertEqual(options.fragment_share, DEFAULT_FRAGMENT_SHARE)
         self.assertEqual(options.redraws, DEFAULT_REDRAWS)
         self.assertEqual(options.merge, DEFAULT_MERGE)
+        self.assertEqual(DEFAULT_PROMPTS, ("主体", "底座"))
+        self.assertEqual(DEFAULT_UNASSIGNED_TO, "body")
+        self.assertEqual(options.unassigned_to, "body")
+        self.assertEqual(options.public()["defaults"]["prompts"], ["主体", "底座"])
+        self.assertEqual(options.public()["defaults"]["unassigned_to"], "body")
         self.assertEqual(options.complete, DEFAULT_COMPLETE)
         self.assertEqual(DEFAULT_COMPLETE, "hybrid")
         self.assertIn("hybrid", options.public()["switches"]["complete"])
@@ -104,6 +110,14 @@ class PipelineKwargsTest(unittest.TestCase):
         self.assertFalse(options.strict_parts)
         self.assertEqual(options.concept_bank, "")
         self.assertIsNone(options.unassigned_to)
+
+    def test_swagger_string_unassigned_keeps_default_body(self):
+        options = PipelineOptions.from_mapping({"unassigned_to": "string"})
+        self.assertEqual(options.unassigned_to, "body")
+
+    def test_swagger_string_concept_bank_keeps_the_default(self):
+        options = PipelineOptions.from_mapping({"concept_bank": "string"})
+        self.assertEqual(options.concept_bank, PipelineOptions().concept_bank)
 
     def test_strict_parts_wins_over_allow_partial_in_a_mapping(self):
         options = PipelineOptions.from_mapping({
