@@ -255,7 +255,7 @@ Stages 3 and 6 cost GPU minutes; the rest is seconds once the renders are cached
 | `--color_tol` | float | `20` | colour distance inside one sample |
 | `--mirror` | `auto` / `none` / `x` / `y` / `z` | `auto` | also intersect the reflection |
 | `--min_recall` | float | `0.5` | mask must cover this share of a unit |
-| `--view_azimuths` × `--view_elevations` | degrees | `45,225` × `10` | SAM3 voting views |
+| `--view_azimuths` × `--view_elevations` | degrees | `45,135,225,315` × `10` | SAM3 voting views |
 | `--radius` / `--resolution` | | `2` / `512` | voting renders |
 | `--sam3_threshold` | float | `0.4` | concept-bank threshold (0.3 without a bank) |
 | `--min_area_share` | float | `0.005` | fold a tiny X-Part piece into its neighbour |
@@ -354,10 +354,10 @@ the corresponding half.
 Go finer to keep a part the size of a bolt head or a button; go coarser when the parts are
 large and the split is shattering flat surfaces into panels.
 
-The default grid is `45,225 × 10`, a barely-raised 3/4 pair. A level azimuth-90 misses
-`torso` on the chest, but height costs more than it buys: at 35 degrees the camera looks
-down far enough that the torso hides the legs and base. `--flat_paint on|off` forces or
-disables stage 1.
+The default grid is `45,135,225,315 × 10`, four barely-raised 3/4 views so both flanks
+vote. A level azimuth-90 misses `torso` on the chest, but height costs more than it buys:
+at 35 degrees the camera looks down far enough that the torso hides the legs and base.
+`--flat_paint on|off` forces or disables stage 1.
 
 Why over-segment first: `full_seg` has no granularity knob and a single sample fuses
 neighbouring parts often enough to matter — on the robot test model, shoulder armour and

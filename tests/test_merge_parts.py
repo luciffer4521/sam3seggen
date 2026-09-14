@@ -6,8 +6,8 @@ from merge_parts import (
 
 
 class MergeDefaultsTest(unittest.TestCase):
-    def test_default_cameras_are_the_low_three_quarter_pair(self):
-        self.assertEqual(DEFAULT_VIEW_AZIMUTHS, "45,225")
+    def test_default_cameras_are_the_four_low_three_quarter_views(self):
+        self.assertEqual(DEFAULT_VIEW_AZIMUTHS, "45,135,225,315")
         # High enough to read the 3/4, low enough not to hide the legs and base.
         self.assertEqual(DEFAULT_VIEW_ELEVATIONS, "10")
 

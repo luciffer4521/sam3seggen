@@ -208,7 +208,7 @@ python segment_parts.py --glb model.glb --out out/parts.glb --work_dir out/work
 | `unassigned_to` | `body` | 没有任何掩码认领的单元并进这个名字。必须是 `prompts` 里已有的名（默认 `body`）；不在名单里或传空则这些面从输出丢掉。Swagger 占位符 `string` 当成没填。 |
 | `flat_paint` | `auto` | 无色渲染先平涂再给 SAM3。见下一节。 |
 | `min_recall` | `0.5` | 一张掩码至少盖住单元这么多像素才认领它。 |
-| `view_azimuths` × `view_elevations` | `45,225` × `10` | SAM3 投票视角。正对 90° 容易漏胸口；抬太高躯干会挡住腿脚。 |
+| `view_azimuths` × `view_elevations` | `45,135,225,315` × `10` | SAM3 投票视角。四角 3/4，避免单侧漏耳；正对 90° 容易漏胸口，抬太高躯干会挡住腿脚。 |
 | `radius` / `resolution` | `2` / `512` | 投票用渲染的相机距离和分辨率。 |
 | `sam3_threshold` | `0.4` | 概念库阈值。关掉概念库后画笔实际是 0.3。 |
 | `concept_bank` / `no_concept_bank` | 环境变量里的 v3 `bank.pt` | 指定 bank 路径，或退回原生 SAM3 词嵌入。两个不要一起传。 |
