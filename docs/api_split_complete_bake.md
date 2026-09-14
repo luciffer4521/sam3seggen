@@ -1,0 +1,329 @@
+# 一条龙 API：拆分 → 修复 → 烘焙
+
+一条 HTTP / Python / CLI 调用走完整主线：几何过分割（开口的 `parts.glb`），提示词只负责取名、可以不写；再用混合修复把切口重生为封闭实体（先 X-Part，大件超框才换成 HoloPart），最后把源模型 albedo 烘回去。
+
+三个入口读同一份契约：`pipeline.PipelineOptions`。`POST /segment` 的字段名与它对齐。改完代码必须重启 `run_serve.sh`，否则 `/health` 仍是旧进程。
+
+## 管线说明
+
+```
+paint → guidance → split → units → merge → complete → bake
+```
+
+| 阶段 | 默认是否跑 | 产物 |
+|---|---|---|
+| 平涂 | 渲染饱和度太低才跑 | `work/views_flat/`（仅无色模型） |
+| 引导图 | 有提示词才跑 | `work/guidance/*.png`、SAM3 掩码 |
+| 拆分 | 是 | `work/atoms.glb`、多次 `full_seg` 求交 |
+| 单元 | 是 | 连通分量 + 双壳合并 |
+| 命名 | 有提示词且 `merge=name` | 开口、已命名、默认已烘贴图的 `parts.glb` |
+| 修复 | `complete=hybrid`（默认） | `complete/xpart_parts_raw.glb`、`xpart_instances.glb`、`decisions.json` |
+| 回烘 | 默认开，且 `with_texture=true` | `complete/xpart_parts.glb` |
+
+`complete` 默认就是 `hybrid`：先跑 X-Part，仅当某实例 **超框 > 50%** 且（面积占比 ≥ 8% 或某轴 ≥ 源模 55%）时，换成该实例的 HoloPart。不想修复时显式传 `complete=off`。`full` 仍是纯 X-Part，便于对照。
+
+
+## HTTP 一条龙
+
+```sh
+HOST=https://u1045120-bc7b-28ae0187.westb.seetacloud.com:8443
+
+curl -X POST "$HOST/segment" \
+  --max-time 3600 \
+  -F "glb=@model.glb" \
+  -F "prompts=head, torso, arm, hand, leg, foot" \
+  -F "unassigned_to=torso" \
+  -F "merge=name" \
+  -F "condition=surface" \
+  -F "granularity=medium" \
+  -F "flat_paint=auto" \
+  -F "with_texture=true" \
+  -F "texture_size=2048"
+```
+
+不传 `complete` 就是 `hybrid`。只要拆不要修：`-F "complete=off"`。只要 X-Part：`-F "complete=full"`。
+
+`prompts` 是**一句逗号分隔**的部件名（中文逗号、顿号也行）。名字里可以有空格。`body=head+face` 仍把多个概念收成一个输出节点。不传则按最细粒度拆成匿名单元并修复。布尔字段按 multipart 传 `true` / `false`。
+
+### 不写提示词
+
+可以。不传 `prompts` 就按几何单元拆（`merge=off`），粒度自动变成最细的 `fine`（150/300），然后照常混合修复。要头/躯干这种名字才需要写提示词。
+
+```sh
+curl -X POST "$HOST/segment" --max-time 3600 \
+  -F "glb=@model.glb"
+```
+
+得到匿名单元：`unit_00`、`unit_01`…，再走默认 `complete=hybrid`。只要拆不修：再加 `-F "complete=off"`。显式 `-F "granularity=coarse"` 会覆盖自动的 `fine`。
+
+成功响应里看这些字段：
+
+| 字段 | 含义 |
+|---|---|
+| `job_id` | 后续下载用（32 位 hex） |
+| `seconds` | 墙钟 |
+| `parts` | 开口件清单（名字、面数、节点） |
+| `options` | 本次实际生效的开关 |
+| `download` | 开口、已命名的 `parts.glb` |
+| `complete` | 烘过贴图的封闭实体；没跑修复则为 `null` |
+| `complete_raw` | 烘焙前的生成实体 |
+| `complete_decisions` | 每个实例用了 X-Part 还是 HoloPart |
+| `atoms` / `report` / `guidance` | 过分割原子、投票表、审阅叠加图 |
+
+| 方法 | 路径 | 内容 |
+|---|---|---|
+| `GET` | `/health` | 六步、开关、默认、GPU 是否占用 |
+| `POST` | `/segment` | 上传 GLB + 选项 → 清单和下载链接 |
+| `GET` | `/jobs/{id}/download` | 开口 `parts.glb` |
+| `GET` | `/jobs/{id}/complete` | 封闭已烘（混合结果） |
+| `GET` | `/jobs/{id}/complete_raw` | 烘焙前的生成实体 |
+| `GET` | `/jobs/{id}/complete_decisions` | `decisions.json` |
+| `GET` | `/jobs/{id}/atoms` | 投票前原子 |
+| `GET` | `/jobs/{id}/report` | 逐单元投票表（没写提示词时没有） |
+| `GET` | `/jobs/{id}/guidance/{name}` | 审阅叠加图 |
+
+下载：
+
+```sh
+HOST=https://u1045120-bc7b-28ae0187.westb.seetacloud.com:8443
+JOB=...   # 响应里的 job_id
+
+# 开口件（拆分 + 可选命名 + 开口烘焙）
+curl -O "$HOST/jobs/${JOB}/download"
+
+# 修复后、已回烘（一条龙的最终封闭模型）
+curl -o xpart_parts.glb "$HOST/jobs/${JOB}/complete"
+
+# 修复后、烘焙前（看生成几何、不看贴图）
+curl -o xpart_parts_raw.glb "$HOST/jobs/${JOB}/complete_raw"
+
+# 每个实例的后端选择
+curl -O "$HOST/jobs/${JOB}/complete_decisions"
+
+# 投票前原子（部件切错时先看这里：边界不存在，改提示词也变不出来）
+curl -O "$HOST/jobs/${JOB}/atoms"
+```
+
+磁盘上对应：
+
+```
+$JOBS_DIR/{job_id}/
+  input.glb
+  parts.glb                          # GET /download
+  parts.json
+  work/atoms.glb
+  work/vote_report.json
+  work/guidance/*.png
+  complete/xpart_parts.glb           # GET /complete（已烘，混合结果）
+  complete/xpart_parts_raw.glb       # GET /complete_raw
+  complete/xpart_instances.glb       # 纯 X-Part 逐件实体
+  complete/hybrid_instances.glb      # 混合后的逐件实体
+  complete/holopart_instances.glb    # 仅当有大件超框、跑过 HoloPart
+  complete/open_instances.glb        # 交给生成器的开口实例
+  complete/boxes.json
+  complete/decisions.json            # GET /complete_decisions
+```
+
+有提示词时，`xpart_parts.glb` 的节点和 `parts.glb` 对齐：按名字收成一组的独立件（两只手）先拆成实例生成，再合并回组。不写提示词时每个 `unit_NN` 就是一个实例，不再并组。
+
+响应里的 `options` 是请求字段的默认快照；不传 `prompts` 时它仍可能写着 `merge=name` / `granularity=medium`，实际跑的是 `off` / `fine`。看日志里的 `[split] no prompts` 或产物节点名。
+
+## Python / CLI 等价调用
+
+```python
+from pipeline import PipelineOptions
+from segment_parts import segment_parts
+
+opts = PipelineOptions(
+    merge="name",
+    condition="surface",
+    granularity="medium",
+    flat_paint="auto",
+    with_texture=True,
+    texture_size=2048,
+)
+segment_parts(
+    "model.glb",
+    ["head", "torso", "arm", "hand", "leg", "foot"],
+    "out/parts.glb",
+    work_dir="out/work",
+    unassigned_to="torso",
+    **opts.segment_kwargs(),
+)
+# 开口件：out/parts.glb
+# 封闭已烘：out/complete/xpart_parts.glb
+```
+
+`PipelineOptions()` 的 `complete` 已是 `hybrid`，不用再写。
+
+```sh
+python segment_parts.py \
+  --glb model.glb \
+  --prompts "head, torso, arm, hand, leg, foot" \
+  --unassigned_to torso \
+  --out out/parts.glb --work_dir out/work \
+  --merge name --condition surface
+```
+
+CLI 里跳过烘焙写 `--no_texture`（没有 `--with_texture` 这种正向 flag）。HTTP / Python 则是 `with_texture=false`。只要拆不修：`--complete off`。不写提示词：省略 `--prompts`（自动 `merge=off` + `granularity=fine` + 混合修复）。
+
+```sh
+python segment_parts.py --glb model.glb --out out/parts.glb --work_dir out/work
+```
+
+拆分很贵、与提示词无关；命名很便宜。有提示词时也可以先 `--merge off` 只看 `work/guidance/`，再用 `merge_parts.py` 命名。一条龙不需要拆成两步。
+
+## 开关说明
+
+未传的字段用 `GET /health` 里的 `defaults`。下面按阶段分组。
+
+### 总控：一条龙必须看的三个
+
+| 开关 | HTTP / Python | CLI | 默认 | 作用 |
+|---|---|---|---|---|
+| `merge` | `name` / `unit` / `fragments` / `off` | 同左 | `name` | `name`：每个提示词一个节点，同名大件会焊在一起。`unit`：每个投票单元一个节点，用来定位是谁取错名。`fragments`：按几何切开留下，只把碎屑折回邻件（门槛是 `fragment_share`）。`off`：不命名，每个几何单元一个节点，**仍然修复**。不传 `prompts` 时 `name`/`unit` 会变成 `off`；显式 `fragments` 会保留。 |
+| `fragment_share` | float | `--fragment_share` | `0.01` | 只在 `merge=fragments` 生效：面积低于表面这么多的单元才算碎屑。更小更碎、保留更多件；更大折得更狠。`0` 等于不折。独立名字的小件（按钮、耳朵）仍会留下。 |
+| `complete` | `off` / `boxes` / `full` / `hybrid` | 同左 | `hybrid` | `off`：不修复。`boxes`：只写盒子提示和预览，不占 GPU。`full`：只跑 X-Part 再烘。`hybrid`：X-Part 之后，大件超框换成 HoloPart，再烘。 |
+| `with_texture` | `true` / `false` | `--no_texture` 关掉 | `true` | 开口件和封闭实体都走 Blender 重 UV + selected-to-active 烘焙。关掉则部件只给占位色，不需要 bpy。**这不表示源模型有没有贴图**，只表示要不要烘。 |
+| `texture_size` | int | `--texture_size` | `2048` | **小件**底图边长。面积 ≥ 8% 升到 2×（默认 4096），≥ 40% 升到 4×（默认 8192），封顶 8192。贴图按 PNG 打进 GLB。 |
+
+一条龙有提示词：`merge=name` + `complete=hybrid` + `with_texture=true`。觉得同名焊得太狠：`-F "merge=fragments"`，再用 `-F "fragment_share=0.02"` 调折回门槛。不写提示词：自动 `merge=off` + `granularity=fine`，修复照常。
+
+### 拆分（几何边界）
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `granularity` | `medium` | 两个尺寸下限一起设：`fine` 150/300、`medium` 300/600、`coarse` 800/1600（原子面数 / 单元面数）。小件（螺栓、按钮）用 `fine`；大件被切成面板时用 `coarse`。 |
+| `min_atom_faces` / `min_unit_faces` | 跟粒度走 | 显式覆盖对应那一半。原子下限挡住采样碎屑；单元下限挡住「单独投票的碎片」。 |
+| `samples` | `7` | 无提示 `full_seg` 求交次数。买到的是更少靠运气，不是更细。 |
+| `azimuth` / `azimuth_jitter` | `0` / `30` | 条件相机朝向，以及额外采样在两侧抖多远。抖太大（例如 60°）会出现近乎空白的分区，meet 会沿着不存在的边界碎裂。 |
+| `color_tol` | `20` | 同一样本内两种颜色算不算两块。降到 3 只会多碎斑，不增加真正的部件。 |
+| `mirror` | `auto` | 把每个采样沿该平面反射后再求交。`none` 关掉。 |
+
+### 命名（语言只取名）
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `prompts` | 可空 | 输出节点名。空 = 匿名单元 + `fine` 拆分 + 照常修复。`name=concept+concept` 合并概念。 |
+| `unassigned_to` | 无 | 没有任何掩码认领的单元并进这个名字。必须是 `prompts` 里已有的名。不设则这些面从输出丢掉。 |
+| `flat_paint` | `auto` | 无色渲染先平涂再给 SAM3。见下一节。 |
+| `min_recall` | `0.5` | 一张掩码至少盖住单元这么多像素才认领它。 |
+| `view_azimuths` × `view_elevations` | `45,225` × `10` | SAM3 投票视角。正对 90° 容易漏胸口；抬太高躯干会挡住腿脚。 |
+| `radius` / `resolution` | `2` / `512` | 投票用渲染的相机距离和分辨率。 |
+| `sam3_threshold` | `0.4` | 概念库阈值。关掉概念库后画笔实际是 0.3。 |
+| `concept_bank` / `no_concept_bank` | 环境变量里的 v3 `bank.pt` | 指定 bank 路径，或退回原生 SAM3 词嵌入。两个不要一起传。 |
+| `allow_partial` | `true` | 某个提示词完全没有掩码时跳过该词，其余继续。 |
+| `strict_parts` | `false` | 反过来：缺掩码或缺面就整单失败。与 `allow_partial` 不要打架；HTTP 里 `strict_parts` 优先。 |
+| `reuse` | `true` | 复用 `work/` 里已有渲染和同提示词掩码。换源模型后应 `reuse=false`（CLI：`--no_reuse`）。 |
+
+### 修复（混合：X-Part + 按需 HoloPart）
+
+| 开关 | 默认 | 作用 |
+|---|---|---|
+| `condition` | `surface` | `surface`：从拆分归属面上采条件点（盒子里装着别人的腿也不会被当成躯干）。`box`：盒内裁剪，旧行为，只作对照。盒子始终会传，用来算 token / 超框。 |
+| `min_area_share` | `0.005` | 表面占比低于此值的连通分量折进最近大件，不单独生成。碎片上 X-Part 不可靠。占比在去掉 remesh 内壁之后算。 |
+| `redraws` | `2` | 生成实体超出自己的盒子时，用同样条件重抽这么多次；只有更贴盒子的那一抽才会被采用。身份嵌入是随机的，偶发巨型件是抽签，不是提示词坏了。 |
+| `octree_resolution` | `512` | X-Part 重建分辨率。 |
+| `seed` | `42` | 生成种子。不能消掉身份嵌入的随机，只能让可复现的那部分固定。 |
+| `py_xpart` / `xpart_root` / `xpart_weights` | 环境变量 | HTTP 不暴露路径；只在本机 CLI / Python 里改。 |
+| `py_holopart` / `holopart_root` / `holopart_weights` | 环境变量 | 同上。没有大件超框时不会启动 HoloPart。 |
+
+换件门槛写死在 `hybrid_complete.py`：超框 `0.5`，面积 `0.08`，轴向 `0.55`。机器人实测只换躯干：腿/脚算「大」但没超框，手即使飘了也太小，不换。
+
+封闭实体的笼子上限仍是 `0.05` / `0.15`，但会按该件到源表面的中位距离收紧：贴得近的用开口件那档（`0.02` / `0.05`），只有飘得远的才用满上限。`texture_size` 同时作用于开口烘焙和封闭回烘，大件自动加像素。
+
+## 如何分辨输入模型有无贴图
+
+管线里有两件不同的事，不要混：
+
+1. **源模型渲染出来有没有颜色** —— 决定要不要 `flat_paint`，让 SAM3 能看见部件。
+2. **输出要不要把源 albedo 烘回去** —— 这是 `with_texture`，和源模型是否带贴图文件无关。白模也可以 `with_texture=true`，烘回去的只是灰白。
+
+### 管线自己怎么判（`flat_paint=auto`）
+
+不读 glTF 的 `baseColorTexture` 字段。它渲染固定视角网格，再算**轮廓内像素**的平均饱和度：
+
+```
+saturation = mean( max(R,G,B) - min(R,G,B) )   # 只统计 alpha > 16 的前景
+```
+
+实现：`flat_paint.is_colorless()`。门槛 `COLORLESS_SATURATION = 8.0`。
+
+| 实测 | 平均饱和度 | 判定 |
+|---|---|---|
+| 无贴图机器人 | 0.25–0.42 | 无色，会平涂 |
+| 有 albedo 的米奇 | 43–53 | 有色，跳过平涂 |
+
+中间空了两个数量级，一般不用按模型调。日志里会打：
+
+```
+mean render saturation 0.31 (colourless, threshold 8)
+mean render saturation 48.20 (textured, threshold 8)
+```
+
+`auto` 判成无色（或你强制 `flat_paint=on`）时，会拿**一次** `full_seg` 的部件色，重映射到互相远离的调色板，栅格化到同一组相机，写出 `work/views_flat/`。这层颜色只给 SAM3 取名用，不改几何。
+
+| `flat_paint` | 行为 |
+|---|---|
+| `auto` | 饱和度 &lt; 8 才平涂（推荐） |
+| `on` | 有贴图也平涂。贴图很灰、SAM3 抓不住时用 |
+| `off` | 永不平涂。白模上 SAM3 常报 `no instance`，整片背面会掉进 `unassigned_to` |
+
+渲染饱和度才是管线用的标准。提交前也可以先看文件：
+
+**A. 有没有 albedo 贴图（glTF）**
+
+```python
+import trimesh
+
+scene = trimesh.load("model.glb", process=False)
+meshes = scene.geometry.values() if hasattr(scene, "geometry") else [scene]
+for mesh in meshes:
+    visual = getattr(mesh, "visual", None)
+    image = getattr(getattr(visual, "material", None), "baseColorTexture", None)
+    print(mesh, "baseColorTexture", image is not None)
+```
+
+有 `baseColorTexture` 通常就是带贴图。爆炸图脚本 `data_toolkit/render_compare_sheet.py` 的 `has_texture()` 也是这个判断：有贴图才显示 albedo，否则用部件染色。
+
+**B. 只有顶点色、没有贴图图**
+
+`visual.kind == "vertex"` 时有逐顶点 RGB，渲染往往仍有饱和度，`flat_paint=auto` 会当成有色。烘焙走的是源表面的 albedo / Emission，顶点色不一定回得来。
+
+**C. 白模 / 金属灰**
+
+没有贴图、也没有可用的顶点色时，渲染饱和度接近 0。`auto` 会平涂。PBR 金属金等在 Diffuse 上几乎是黑的，回烘时 Blender 走 Emission 通道，避免烘成一片黑。
+
+**D. 和 `with_texture` 怎么配**
+
+| 源模型 | 建议 |
+|---|---|
+| 有真实 albedo | `flat_paint=auto`（会跳过平涂），`with_texture=true`，封闭件带回原贴图 |
+| 白模 / 无色 | `flat_paint=auto`（会平涂，SAM3 才找得到头和躯干），`with_texture=true` 仍可开（烘回的是灰），或 `false` 省掉 Blender |
+| 有贴图但看起来像灰模、命名失败 | 改 `flat_paint=on`，不要关 `with_texture` |
+
+判断「有没有贴图」看渲染饱和度或 `baseColorTexture`；判断「输出要不要贴图」看 `with_texture`。
+
+## 推荐的一条龙取值
+
+不写提示词（最细拆 + 混合修复）：
+
+```
+# 只上传 glb，其余用默认
+# 实际生效：merge=off，granularity=fine，complete=hybrid
+```
+
+有名字的中等部件、可能无贴图：
+
+```
+prompts=head, torso, arm, hand, leg, foot
+unassigned_to=torso
+merge=name
+# complete 默认 hybrid，不用写
+condition=surface
+granularity=medium
+flat_paint=auto
+with_texture=true
+min_area_share=0.005
+redraws=2
+```

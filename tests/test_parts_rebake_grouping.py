@@ -9,9 +9,11 @@ from data_toolkit.parts_rebake import (
     SPLIT_MODES,
     _split_labels,
     absorb_small_fragments,
+    cage_for_gap,
     completed_part_geometries,
     merge_labels_by_part,
     palette_from_legend,
+    part_texture_size,
     reassign_label_islands,
     weld_pieces_to_map,
 )
@@ -108,3 +110,26 @@ class CompletedBakeInputTest(unittest.TestCase):
             parts = completed_part_geometries(path)
         self.assertEqual([p["name"] for p in parts], ["head"])
         np.testing.assert_allclose(np.asarray(parts[0]["vertices"]).mean(axis=0)[1], 2.0, atol=1e-3)
+
+
+class BakeResolutionTest(unittest.TestCase):
+    def test_part_texture_size_scales_with_area(self):
+        self.assertEqual(part_texture_size(0.06), 2048)
+        self.assertEqual(part_texture_size(0.08), 4096)
+        self.assertEqual(part_texture_size(0.39), 4096)
+        self.assertEqual(part_texture_size(0.40), 8192)
+        self.assertEqual(part_texture_size(0.96), 8192)
+        self.assertEqual(part_texture_size(0.96, base=1024), 4096)
+        self.assertEqual(part_texture_size(0.96, base=4096), 8192)
+
+    def test_cage_tightens_when_the_solid_hugs(self):
+        self.assertEqual(cage_for_gap(None), (0.05, 0.15))
+        tight_ext, tight_ray = cage_for_gap(0.005)
+        self.assertAlmostEqual(tight_ext, 0.02)
+        self.assertAlmostEqual(tight_ray, 0.05)
+        mid_ext, mid_ray = cage_for_gap(0.03)
+        self.assertAlmostEqual(mid_ext, 0.045)
+        self.assertAlmostEqual(mid_ray, 0.12)
+        loose_ext, loose_ray = cage_for_gap(0.08)
+        self.assertAlmostEqual(loose_ext, 0.05)
+        self.assertAlmostEqual(loose_ray, 0.15)

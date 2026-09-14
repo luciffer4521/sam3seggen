@@ -3,6 +3,7 @@ import unittest
 from prompt_specs import (
     normalize_part_specs,
     part_names,
+    split_prompt_entries,
     validate_named_rows,
     validate_part_coverage,
     validate_target_name,
@@ -15,6 +16,30 @@ class PromptSpecsTest(unittest.TestCase):
             normalize_part_specs("armor"),
             [("armor", ["armor"])],
         )
+
+    def test_comma_separated_sentence_is_one_part_per_token(self):
+        self.assertEqual(
+            part_names(normalize_part_specs("head, torso, arm")),
+            ["head", "torso", "arm"],
+        )
+        self.assertEqual(
+            part_names(normalize_part_specs("head，torso、arm")),
+            ["head", "torso", "arm"],
+        )
+
+    def test_comma_sentence_keeps_spaces_inside_a_name(self):
+        self.assertEqual(
+            normalize_part_specs("mushroom=small mushroom, chair"),
+            [("mushroom", ["small mushroom"]), ("chair", ["chair"])],
+        )
+
+    def test_trailing_comma_and_mixed_list_are_flattened(self):
+        self.assertEqual(
+            part_names(normalize_part_specs(["head, torso,", "arm"])),
+            ["head", "torso", "arm"],
+        )
+        self.assertEqual(split_prompt_entries(""), [])
+        self.assertEqual(split_prompt_entries("  ,  ， "), [])
 
     def test_accepts_arbitrary_grouped_prompt_list(self):
         self.assertEqual(

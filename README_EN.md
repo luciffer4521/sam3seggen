@@ -207,7 +207,7 @@ segment_parts("model.glb", ["head", "torso"], "out/parts.glb",
 ```sh
 python segment_parts.py \
   --glb model.glb \
-  --prompts head torso arm hand leg foot \
+  --prompts "head, torso, arm, hand, leg, foot" \
   --unassigned_to torso \
   --out out/parts.glb --work_dir out/work
 ```
@@ -233,9 +233,12 @@ stages:
    the most specific one winning; unseen faces inherit the nearest visible one. Faces are
    exported per name with the source albedo baked back on.
 6. **complete**, gated by `--complete`: our parts are open where they were cut, so X-Part
-   regenerates each as a closed solid (`xpart_complete.py`). `--complete full` then bakes
-   the source albedo onto those solids (the same Blender selected-to-active path as the
-   split, with a looser cage, because a generated surface only approximates the source).
+   regenerates each as a closed solid (`xpart_complete.py`). Instances that share a name
+   (both hands, both legs) are generated as separate objects, then merged back so
+   `xpart_parts.glb` has the same grouping as `parts.glb`; the per-instance solids stay in
+   `xpart_instances.glb`. `--complete full` then bakes the source albedo onto the grouped
+   solids (the same Blender selected-to-active path as the split, with a looser cage,
+   because a generated surface only approximates the source).
 
 Stages 3 and 6 cost GPU minutes; the rest is seconds once the renders are cached.
 
@@ -374,10 +377,10 @@ writing the guidance overlays if prompts were given, so you can look before merg
 
 ```sh
 python segment_parts.py --glb model.glb --merge off --out split/units.glb \
-  --prompts head torso arm hand leg foot --unassigned_to torso
+  --prompts "head, torso, arm, hand, leg, foot" --unassigned_to torso
 # after reviewing split/work/guidance/*.png
 python merge_parts.py --glb model.glb --split split/work \
-  --prompts head torso arm hand leg foot --unassigned_to torso \
+  --prompts "head, torso, arm, hand, leg, foot" --unassigned_to torso \
   --out named/parts.glb
 ```
 
@@ -479,20 +482,22 @@ manifest = segment(
 
 ### `serve_api.py` — the same pipeline over HTTP
 
-```sh
-./run_serve.sh --port 8020          # interactive docs at /docs
+One-shot split → X-Part repair → bake (Chinese): [docs/api_split_complete_bake.md](docs/api_split_complete_bake.md).
 
-curl -X POST http://127.0.0.1:8020/segment \
+```sh
+./run_serve.sh --port 6006          # AutoDL custom service; interactive docs at /docs
+
+curl -X POST http://127.0.0.1:6006/segment \
   -F "glb=@model.glb" \
-  -F "prompts=leaves" -F "prompts=fruit" \
+  -F "prompts=leaves, fruit" \
   -F "unassigned_to=fruit" \
   -F "granularity=coarse" -F "complete=full"
 ```
 
 `POST /segment` runs `segment_parts.py`. Multipart field names match `PipelineOptions`;
-anything omitted takes the table above. Repeat `prompts` once per part (a concept may
-contain spaces); they may be empty only with `merge=off`. `sam3_threshold` defaults to
-**0.4**. `POST /segment_legacy` is the old 2D-map route.
+anything omitted takes the table above. `prompts` is one comma-separated sentence
+(a concept may contain spaces). Empty is allowed only with `merge=off`.
+`sam3_threshold` defaults to **0.4**. `POST /segment_legacy` is the old 2D-map route.
 
 A successful response carries the `parts` manifest, the `options` that actually ran, and
 these links:

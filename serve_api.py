@@ -1,12 +1,13 @@
 """HTTP wrapper around segment_parts.segment_parts: upload a model, get its parts back.
 
     POST /segment            multipart upload + options -> manifest and download links
+                             `prompts` is one comma-separated sentence, e.g. "head, torso"
     POST /segment_legacy     the deprecated 2D-map pipeline (segment_api.segment)
     GET  /jobs/{id}/download the result (one glb, or a zip in separate mode)
     GET  /jobs/{id}/parts/*  one part's glb
     GET  /jobs/{id}/atoms    the over-segmented atoms the vote merged (vertex-coloured)
     GET  /jobs/{id}/report   the per-unit vote report
-    GET  /jobs/{id}/complete the X-Part solids (textured, if baked)
+    GET  /jobs/{id}/complete the closed solids (hybrid by default; textured, if baked)
     GET  /jobs/{id}/complete_raw the solids before the albedo bake
     GET  /jobs/{id}/guidance/{name} one review overlay from work/guidance/
     GET  /jobs/{id}/map      the 2D part map, legacy jobs only
@@ -134,6 +135,8 @@ def _run_job(job_id: str, upload: bytes, filename: str, options: dict, legacy=Fa
             os.path.join(job, "complete", "xpart_parts.glb")) else None,
         "complete_raw": f"{base}/complete_raw" if os.path.isfile(
             os.path.join(job, "complete", "xpart_parts_raw.glb")) else None,
+        "complete_decisions": f"{base}/complete_decisions" if os.path.isfile(
+            os.path.join(job, "complete", "decisions.json")) else None,
         "guidance": [
             f"{base}/guidance/{name}"
             for name in sorted(os.listdir(guidance_dir))
@@ -167,11 +170,12 @@ def health() -> dict:
 @app.post("/segment")
 async def segment(
     glb: UploadFile = File(..., description="The model to split."),
-    prompts: list[str] = Form(
-        default=[],
-        description="Repeat once per output part. Join concepts with '+' to merge them "
-                    "into one part, optionally named: 'opening=door+window'. Empty is "
-                    "allowed only with merge=off."),
+    prompts: str = Form(
+        default="",
+        description="One comma-separated sentence of part names, e.g. "
+                    "'head, torso, arm'. Spaces inside a name are kept. "
+                    "'body=head+face' still merges concepts. Empty = unnamed "
+                    "units at fine granularity, then hybrid repair."),
     unassigned_to: str | None = Form(
         None, description="Part that absorbs units no concept claimed."),
     samples: int = Form(_DEFAULTS.samples),
@@ -193,19 +197,28 @@ async def segment(
     merge: str = Form(
         _DEFAULTS.merge,
         description="name = one node per prompt; unit = one node per voted unit; "
-                    "off = stop after the units."),
+                    "fragments = keep the geometric split, fold only specks; "
+                    "off = unnamed units."),
     complete: str = Form(
         _DEFAULTS.complete,
-        description="off | boxes (prompts only) | full (regenerate + bake)."),
+        description="off | boxes (prompts only) | full (X-Part only) | "
+                    "hybrid (X-Part, HoloPart on large box-escapees; default)."),
     condition: str = Form(
         _DEFAULTS.condition,
         description="surface = faces the split assigned; box = whatever is in the box."),
     min_area_share: float = Form(_DEFAULTS.min_area_share),
+    fragment_share: float = Form(
+        _DEFAULTS.fragment_share,
+        description="merge=fragments: fold a unit below this share of the surface. "
+                    "Smaller keeps more pieces (default 0.01)."),
     redraws: int = Form(_DEFAULTS.redraws),
     octree_resolution: int = Form(_DEFAULTS.octree_resolution),
     seed: int = Form(_DEFAULTS.seed),
     with_texture: bool = Form(_DEFAULTS.with_texture),
-    texture_size: int = Form(_DEFAULTS.texture_size),
+    texture_size: int = Form(
+        _DEFAULTS.texture_size,
+        description="Small-part atlas edge. Parts covering ≥8% / ≥40% of the surface "
+                    "bake at 2× / 4× this, capped at 8192."),
     reuse: bool = Form(_DEFAULTS.reuse),
     sam3_threshold: float = Form(_DEFAULTS.sam3_threshold),
     concept_bank: str | None = Form(None),
@@ -250,6 +263,7 @@ async def segment(
         "complete": complete,
         "condition": condition,
         "min_area_share": min_area_share,
+        "fragment_share": fragment_share,
         "redraws": redraws,
         "octree_resolution": octree_resolution,
         "seed": seed,
@@ -278,10 +292,9 @@ async def segment(
 @app.post("/segment_legacy", deprecated=True)
 async def segment_legacy(
     glb: UploadFile = File(..., description="The model to split."),
-    prompts: list[str] = Form(
-        ..., description="Repeat once per output part. Join concepts with '+' to merge "
-                         "them into one part, optionally named: 'opening=door+window'. "
-                         "Never space-separate them -- a concept may contain spaces."),
+    prompts: str = Form(
+        ..., description="One comma-separated sentence of part names, e.g. "
+                        "'head, torso, arm'. '+' still merges concepts."),
     unassigned_to: str | None = Form(
         None, description="Part that absorbs foreground no prompt claimed, so the output "
                           "has exactly as many parts as were asked for."),
@@ -380,6 +393,12 @@ def complete_raw(job_id: str):
                         media_type="model/gltf-binary", filename="xpart_parts_raw.glb")
 
 
+@app.get("/jobs/{job_id}/complete_decisions")
+def complete_decisions(job_id: str):
+    return FileResponse(_artifact(job_id, "complete", "decisions.json"),
+                        media_type="application/json")
+
+
 @app.get("/jobs/{job_id}/guidance/{name}")
 def guidance(job_id: str, name: str):
     if os.path.basename(name) != name or not name.endswith(".png"):
@@ -405,7 +424,7 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8020)
+    parser.add_argument("--port", type=int, default=6006)
     args = parser.parse_args()
     os.makedirs(JOBS_DIR, exist_ok=True)
     print(f"jobs kept in {JOBS_DIR}; docs at http://{args.host}:{args.port}/docs")

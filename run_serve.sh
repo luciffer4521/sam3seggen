@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# HTTP part-splitting service. Example: ./run_serve.sh --port 8020
+# HTTP part-splitting service. AutoDL custom-service port is 6006.
 set -euo pipefail
 ROOT=/root/autodl-tmp/sam3seggen
 # shellcheck disable=SC1091

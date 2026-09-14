@@ -324,6 +324,97 @@ def _reset_bpy_scene():
             block.remove(item, do_unlink=True)
 
 
+# texture_size is the atlas for a small part. Bigger shares get more texels; 8K is the
+# cap (one 8K RGBA image is 256 MB). Thresholds match hybrid_complete's "large part".
+TEXTURE_AREA_MEDIUM = 0.08
+TEXTURE_AREA_LARGE = 0.40
+TEXTURE_SIZE_MAX = 8192
+TIGHT_CAGE = (0.02, 0.05)
+LOOSE_CAGE = (0.05, 0.15)
+
+
+def part_texture_size(area_share, base=2048, max_size=TEXTURE_SIZE_MAX):
+    """Atlas edge length for one part. `base` is the small-part size the caller asked for."""
+    share = 0.0 if area_share is None else float(area_share)
+    if share >= TEXTURE_AREA_LARGE:
+        raw = base * 4
+    elif share >= TEXTURE_AREA_MEDIUM:
+        raw = base * 2
+    else:
+        raw = base
+    raw = max(256, min(int(max_size), int(raw)))
+    size = 256
+    while size * 2 <= raw:
+        size *= 2
+    return size
+
+
+def cage_for_gap(gap, tight=TIGHT_CAGE, loose=LOOSE_CAGE):
+    """Tighten the bake cage when the solid already hugs the source.
+
+    Generated meshes only approximate the original. A fixed 0.05/0.15 cage always
+    samples from far away and blurs the albedo; a measured gap lets well-aligned
+    solids keep the split's tight cage and only loosens as far as they actually drift.
+    """
+    if gap is None:
+        return loose
+    extrusion = min(max(float(gap) * 1.5, tight[0]), loose[0])
+    ray = min(max(float(gap) * 4.0, tight[1]), loose[1])
+    return extrusion, ray
+
+
+def _apply_cage(cage_extrusion, max_ray_distance):
+    import bpy
+
+    scene = bpy.context.scene
+    scene.render.bake.cage_extrusion = cage_extrusion
+    scene.render.bake.max_ray_distance = max_ray_distance
+
+
+def _part_source_gap(part_obj, source_objects, sample_cap=4000):
+    """Median world-space distance from dest verts to the source surface."""
+    import bpy
+    from mathutils.bvhtree import BVHTree
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    trees = [BVHTree.FromObject(obj, depsgraph) for obj in source_objects]
+    trees = [tree for tree in trees if tree is not None]
+    if not trees:
+        return None
+    coords = [part_obj.matrix_world @ vert.co for vert in part_obj.data.vertices]
+    if not coords:
+        return None
+    if len(coords) > sample_cap:
+        step = max(1, len(coords) // sample_cap)
+        coords = coords[::step]
+    distances = []
+    for coord in coords:
+        best = None
+        for tree in trees:
+            hit = tree.find_nearest(coord)
+            if hit[0] is None:
+                continue
+            dist = float(hit[3])
+            if best is None or dist < best:
+                best = dist
+        if best is not None:
+            distances.append(best)
+    if not distances:
+        return None
+    distances.sort()
+    return distances[len(distances) // 2]
+
+
+def _export_selected_glb(path):
+    import bpy
+
+    kwargs = {"filepath": path, "export_format": "GLB", "use_selection": True}
+    try:
+        bpy.ops.export_scene.gltf(**kwargs, export_image_format="AUTO")
+    except TypeError:
+        bpy.ops.export_scene.gltf(**kwargs)
+
+
 def _setup_cycles_bake(samples, cage_extrusion, max_ray_distance, margin=2):
     import bpy
 
@@ -341,8 +432,7 @@ def _setup_cycles_bake(samples, cage_extrusion, max_ray_distance, margin=2):
     scene.render.bake.use_pass_direct = False
     scene.render.bake.use_pass_indirect = False
     scene.render.bake.use_pass_color = True
-    scene.render.bake.cage_extrusion = cage_extrusion
-    scene.render.bake.max_ray_distance = max_ray_distance
+    _apply_cage(cage_extrusion, max_ray_distance)
     # Smart Project packs many small islands close together (see uv_margin); Blender's
     # default 16px bake margin is an "extend" fill that then bleeds each island's edge
     # colour across into its neighbours, showing up as confetti-like noise once islands
@@ -444,6 +534,7 @@ def _assign_bake_image(obj, name, texture_size):
     import bpy
 
     image = bpy.data.images.new(f"{name}_basecolor", texture_size, texture_size)
+    image.file_format = "PNG"
     material = bpy.data.materials.new(f"{name}_mat")
     material.use_nodes = True
     tex_node = material.node_tree.nodes.new("ShaderNodeTexImage")
@@ -543,7 +634,7 @@ def blender_reuv_and_bake(mesh, source_glb, texture_size=2048, uv_angle_limit=66
         # skips any per-node transform glTF export would otherwise store separately, so
         # the undo-rotation above has to be baked into the vertices themselves here.
         bpy.ops.object.transform_apply(location=True, rotation=True, scale=True)
-        bpy.ops.export_scene.gltf(filepath=out, export_format="GLB", use_selection=True)
+        _export_selected_glb(out)
         baked = load_single_mesh(out)
     print(f"Blender re-UV + bake: {len(mesh.faces)} faces, {texture_size}px from {source_glb}")
     return baked
@@ -551,12 +642,13 @@ def blender_reuv_and_bake(mesh, source_glb, texture_size=2048, uv_angle_limit=66
 
 def bake_parts(parts, source_glb, out_dir, texture_size, uv_angle_limit, uv_margin,
                cage_extrusion, max_ray_distance, samples, margin=2, combined_name="parts.glb",
-               save_textures=False, source_frame=False):
+               save_textures=False, source_frame=False, adapt_cage=False):
     """Re-UV and bake every part, then export them all as one glb (one node per part).
 
     Each part keeps its own mesh/material/UV/texture, so downstream tools can still tell
     them apart by node name, but the whole assembly loads and moves as a single file
-    instead of one glb per part.
+    instead of one glb per part. Atlas size scales with the part's area share; `texture_size`
+    is the small-part edge. Closed solids can tighten the cage from the measured gap.
     """
     import bpy
 
@@ -576,15 +668,25 @@ def bake_parts(parts, source_glb, out_dir, texture_size, uv_angle_limit, uv_marg
     print(f"aligned source bounds {source_bounds.min(axis=0).round(3)} .. {source_bounds.max(axis=0).round(3)}")
     print(f"parts bounds          {part_bounds.min(axis=0).round(3)} .. {part_bounds.max(axis=0).round(3)}")
 
+    total_area = float(sum(part["area"] for part in parts)) or 1.0
     os.makedirs(out_dir, exist_ok=True)
     manifest = []
     part_objects = []
     for part in parts:
         suffix = "".join(c if c.isalnum() else "_" for c in part["name"]) if part["name"] else ""
         name = f"part_{part['label']:02d}" + (f"_{suffix}" if suffix else "")
+        share = float(part["area"]) / total_area
+        size = part_texture_size(share, texture_size)
+        island_margin = max(0.0004, uv_margin * (2048.0 / size))
         part_obj = _make_part_object(name, part["vertices"], part["faces"])
-        _smart_project(part_obj, uv_angle_limit, uv_margin)
-        image = _assign_bake_image(part_obj, name, texture_size)
+        _smart_project(part_obj, uv_angle_limit, island_margin)
+        cage = (cage_extrusion, max_ray_distance)
+        gap = None
+        if adapt_cage:
+            gap = _part_source_gap(part_obj, source_objects)
+            cage = cage_for_gap(gap, TIGHT_CAGE, (cage_extrusion, max_ray_distance))
+            _apply_cage(*cage)
+        image = _assign_bake_image(part_obj, name, size)
         _bake_selected_to_active(source_objects, part_obj)
         image.pack()
         if save_textures:
@@ -594,7 +696,10 @@ def bake_parts(parts, source_glb, out_dir, texture_size, uv_angle_limit, uv_marg
             image.save()
 
         part_objects.append(part_obj)
-        print(f"  {name}: {len(part['faces'])} faces baked")
+        extra = f", cage={cage[0]:.3f}/{cage[1]:.3f}"
+        if gap is not None:
+            extra += f" gap={gap:.4f}"
+        print(f"  {name}: {len(part['faces'])} faces, {size}px, area={share:.1%}{extra}")
         manifest.append({
             "label": part["label"],
             "name": part["name"],
@@ -602,6 +707,8 @@ def bake_parts(parts, source_glb, out_dir, texture_size, uv_angle_limit, uv_marg
             "part_color": part["part_color"],
             "faces": int(len(part["faces"])),
             "area": part["area"],
+            "texture_size": size,
+            "area_share": share,
         })
 
     if not source_frame:
@@ -612,7 +719,7 @@ def bake_parts(parts, source_glb, out_dir, texture_size, uv_angle_limit, uv_marg
     for obj in part_objects:
         obj.select_set(True)
     bpy.context.view_layer.objects.active = part_objects[0]
-    bpy.ops.export_scene.gltf(filepath=combined_path, export_format="GLB", use_selection=True)
+    _export_selected_glb(combined_path)
     print(f"combined {len(part_objects)} parts -> {combined_path}")
 
     with open(os.path.join(out_dir, "parts.json"), "w", encoding="utf-8") as f:
@@ -795,8 +902,8 @@ def bake_completed(completed_glb, source_glb, out_dir, texture_size=2048,
                    combined_name="xpart_parts.glb", save_textures=False):
     """Re-UV X-Part's closed solids and bake the source albedo onto them.
 
-    The cage is looser than the split bake: a generated solid only approximates the
-    source surface, and the default 0.02/0.05 pair leaves most of it unhit.
+    The cage starts at the loose 0.05/0.15 pair because a generated solid only
+    approximates the source, then tightens per part from the measured gap.
     """
     parts = completed_part_geometries(completed_glb)
     print(f"{len(parts)} closed solids from {os.path.basename(completed_glb)}")
@@ -806,6 +913,7 @@ def bake_completed(completed_glb, source_glb, out_dir, texture_size=2048,
         parts, source_glb, out_dir, texture_size, uv_angle_limit, uv_margin,
         cage_extrusion, max_ray_distance, samples, margin,
         combined_name=combined_name, save_textures=save_textures, source_frame=True,
+        adapt_cage=True,
     )
 
 

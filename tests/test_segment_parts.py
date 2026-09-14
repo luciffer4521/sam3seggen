@@ -6,12 +6,34 @@ from data_toolkit.meet_samples import meet_labels
 from data_toolkit.unit_vote import (
     assign_units, fuse_inner_shells, score_units, split_units, tally_votes,
 )
-from segment_parts import sample_azimuths
+from segment_parts import resolve_unprompted, sample_azimuths
 
 
 def grid_adjacency(count):
     """A path graph over `count` faces: every face touches the next one."""
     return np.stack([np.arange(count - 1), np.arange(1, count)], axis=1)
+
+
+class UnpromptedTest(unittest.TestCase):
+    def test_empty_prompts_force_unnamed_fine_units(self):
+        merge, granularity = resolve_unprompted("", "name", "medium")
+        self.assertEqual(merge, "off")
+        self.assertEqual(granularity, "fine")
+
+    def test_an_explicit_granularity_is_kept_when_prompts_are_empty(self):
+        merge, granularity = resolve_unprompted([], "off", "coarse")
+        self.assertEqual(merge, "off")
+        self.assertEqual(granularity, "coarse")
+
+    def test_prompts_leave_merge_and_granularity_alone(self):
+        merge, granularity = resolve_unprompted("head, torso", "name", "medium")
+        self.assertEqual(merge, "name")
+        self.assertEqual(granularity, "medium")
+
+    def test_empty_prompts_keep_an_explicit_fragments_merge(self):
+        merge, granularity = resolve_unprompted("", "fragments", "medium")
+        self.assertEqual(merge, "fragments")
+        self.assertEqual(granularity, "fine")
 
 
 class SampleAzimuthsTest(unittest.TestCase):

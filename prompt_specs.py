@@ -1,21 +1,41 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
 
 
 PartSpec = tuple[str, list[str]]
 
+# One sentence from the caller: "head, torso, arm". Chinese commas / enumeration
+# marks count as the same split. Spaces inside a token stay (mushroom=small mushroom).
+_PROMPT_SEP = re.compile(r"[,，、]+")
+
+
+def split_prompt_entries(entries: str | Sequence[str] | None) -> list[str]:
+    """Flatten a prompt field into one token per output part.
+
+    Accepts the one-line form (`"head, torso, arm"`), a list of tokens, or a mix.
+    Empty pieces from a trailing comma are dropped.
+    """
+    if entries is None:
+        return []
+    raw = [entries] if isinstance(entries, str) else list(entries)
+    parts: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            raise ValueError("component prompt entries must be non-empty strings")
+        parts.extend(piece.strip() for piece in _PROMPT_SEP.split(item) if piece.strip())
+    return parts
+
 
 def normalize_part_specs(entries: str | Sequence[str]) -> list[PartSpec]:
-    raw_entries = [entries] if isinstance(entries, str) else list(entries)
+    raw_entries = split_prompt_entries(entries)
     if not raw_entries:
         raise ValueError("at least one component prompt is required")
 
     specs: list[PartSpec] = []
     for raw in raw_entries:
-        if not isinstance(raw, str) or not raw.strip():
-            raise ValueError("component prompt entries must be non-empty strings")
         name, separator, joined = raw.partition("=")
         name = name.strip()
         joined = joined if separator else raw

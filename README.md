@@ -194,7 +194,7 @@ segment_parts("model.glb", ["head", "torso"], "out/parts.glb",
 ```sh
 python segment_parts.py \
   --glb model.glb \
-  --prompts head torso arm hand leg foot \
+  --prompts "head, torso, arm, hand, leg, foot" \
   --unassigned_to torso \
   --out out/parts.glb --work_dir out/work
 ```
@@ -213,7 +213,9 @@ python segment_parts.py \
 5. **合并**（由 `--merge` 开关控制）：每个单元取第 2 步掩码覆盖它的名字，同时覆盖的取最
    贴合的那个；相机看不到的按最近可见面继承。按名字导出，并把原模型的 albedo 烘回每个部件。
 6. **补全**（由 `--complete` 开关控制）：我们的部件在切口处是敞开的，X-Part 把每个部件重新
-   生成为封闭实体（`xpart_complete.py`）。`--complete full` 之后把原模型 albedo 烘回这些实体
+   生成为封闭实体（`xpart_complete.py`）。按名字收成一组的独立件（两只手、两条腿）先拆成
+   实例各自生成，再合并回原来的组，所以 `xpart_parts.glb` 的节点和 `parts.glb` 对齐；逐件
+   实体留在 `xpart_instances.glb`。`--complete full` 之后把原模型 albedo 烘回合并后的实体
    （和拆分那步同一套 Blender selected-to-active，只是笼子更松，因为生成面只是近似原表面）。
 
 第 3、6 步要花 GPU 时间，其余在渲染图缓存后都是秒级。
@@ -329,10 +331,10 @@ X-Part 在碎片上不可靠，而碎片通常也不是部件，只是切口留�
 
 ```sh
 python segment_parts.py --glb model.glb --merge off --out split/units.glb \
-  --prompts head torso arm hand leg foot --unassigned_to torso
+  --prompts "head, torso, arm, hand, leg, foot" --unassigned_to torso
 # 看过 split/work/guidance/*.png 之后
 python merge_parts.py --glb model.glb --split split/work \
-  --prompts head torso arm hand leg foot --unassigned_to torso \
+  --prompts "head, torso, arm, hand, leg, foot" --unassigned_to torso \
   --out named/parts.glb
 ```
 
@@ -414,18 +416,20 @@ manifest = segment(
 
 ### `serve_api.py` —— HTTP 接口
 
-```sh
-./run_serve.sh --port 8020          # 交互式文档在 /docs
+一条龙（拆分 → X-Part 修复 → 烘焙）的调用示例、开关说明、以及如何分辨输入有无贴图，见 [docs/api_split_complete_bake.md](docs/api_split_complete_bake.md)。
 
-curl -X POST http://127.0.0.1:8020/segment \
+```sh
+./run_serve.sh --port 6006          # AutoDL 自定义服务；交互式文档在 /docs
+
+curl -X POST http://127.0.0.1:6006/segment \
   -F "glb=@model.glb" \
-  -F "prompts=leaves" -F "prompts=fruit" \
+  -F "prompts=leaves, fruit" \
   -F "unassigned_to=fruit" \
   -F "granularity=coarse" -F "complete=full"
 ```
 
 `POST /segment` 走 `segment_parts.py`。multipart 字段名与 `PipelineOptions` 一致，未传的用上表
-默认值。`prompts` 每个部件传一次（概念可以带空格）；`merge=off` 时可以为空。
+默认值。`prompts` 是**一句逗号分隔**的部件名（概念里可以有空格）；`merge=off` 时可以为空。
 `sam3_threshold` 默认 **0.4**。`POST /segment_legacy` 是旧的 2D 引导路线。
 
 成功响应带 `parts` 清单、本次生效的 `options`，以及下面这些链接：

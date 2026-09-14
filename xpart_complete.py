@@ -219,10 +219,33 @@ def component_boxes(nodes, min_area_share=DEFAULT_MIN_AREA_SHARE,
         drop_inner_shells(welded_pieces(nodes), containment), min_area_share)
     total_area = sum(float(piece.area) for _, piece in pieces)
     boxes = np.stack([bounding_box(piece) for _, piece in pieces])
-    rows = [{"name": name, "faces": int(len(piece.faces)),
+    rows = [{"name": name, "instance": index, "faces": int(len(piece.faces)),
              "area_share": float(piece.area) / total_area, "box": box.tolist()}
-            for (name, piece), box in zip(pieces, boxes)]
+            for index, ((name, piece), box) in enumerate(zip(pieces, boxes))]
     return boxes, rows, [piece for _, piece in pieces]
+
+
+def group_solids(names, solids):
+    """Put independently repaired instances back into the named groups they came from.
+
+    `parts.glb` is one node per prompt — both hands live in `hand`. Repair has to treat
+    those as two objects (a shared box would span the body), then this concatenates the
+    closed solids so the completed glb has the same grouping again.
+    """
+    order, buckets = [], {}
+    for name, solid in zip(names, solids):
+        if solid is None:
+            continue
+        if name not in buckets:
+            order.append(name)
+            buckets[name] = []
+        buckets[name].append(solid)
+    grouped = []
+    for name in order:
+        meshes = buckets[name]
+        grouped.append((name, trimesh.util.concatenate(meshes) if len(meshes) > 1
+                        else meshes[0]))
+    return grouped
 
 
 def xpart_normalization(bounds):
@@ -361,6 +384,11 @@ def main():
     with open(os.path.join(out_dir, "boxes.json"), "w", encoding="utf-8") as handle:
         json.dump(rows, handle, indent=2)
 
+    open_instances = trimesh.Scene()
+    for index, (row, surface) in enumerate(zip(rows, surfaces)):
+        open_instances.add_geometry(surface, geom_name=f"{index:02d}_{row['name']}")
+    open_instances.export(os.path.join(out_dir, "open_instances.glb"))
+
     preview = trimesh.Scene()
     preview.add_geometry(source)
     for box in boxes:
@@ -400,12 +428,19 @@ def main():
     solids = redraw_escapees(pipeline, os.path.abspath(args.glb), boxes, condition, names,
                              solids, args)
 
-    out = trimesh.Scene()
+    instances = trimesh.Scene()
     for index, solid in enumerate(solids):
         if solid is not None:
-            out.add_geometry(solid, geom_name=f"{index:02d}_{names[index]}")
+            instances.add_geometry(solid, geom_name=f"{index:02d}_{names[index]}")
+    instances.export(os.path.join(out_dir, "xpart_instances.glb"))
+    print(f"saved {out_dir}/xpart_instances.glb ({len(instances.geometry)} solids)")
+
+    out = trimesh.Scene()
+    for name, mesh in group_solids(names, solids):
+        out.add_geometry(mesh, geom_name=name)
     out.export(os.path.join(out_dir, "xpart_parts.glb"))
-    print(f"saved {out_dir}/xpart_parts.glb ({len(out.geometry)} solids)")
+    print(f"saved {out_dir}/xpart_parts.glb "
+          f"({len(out.geometry)} groups from {len(instances.geometry)} solids)")
 
 
 def generate(pipeline, glb, boxes, condition, names, args):

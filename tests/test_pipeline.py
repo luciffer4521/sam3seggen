@@ -5,11 +5,12 @@ import unittest
 
 from data_toolkit.meet_samples import DEFAULT_COLOR_TOL as MEET_COLOR_TOL
 from data_toolkit.meet_samples import DEFAULT_MIN_FACES
+from data_toolkit.unit_vote import DEFAULT_FRAGMENT_SHARE as VOTE_FRAGMENT_SHARE
 from data_toolkit.unit_vote import DEFAULT_MIN_RECALL as VOTE_MIN_RECALL
 from data_toolkit.unit_vote import DEFAULT_MIN_UNIT_FACES
 from pipeline import (
     DEFAULT_COLOR_TOL, DEFAULT_COMPLETE, DEFAULT_CONDITION, DEFAULT_FLAT_PAINT,
-    DEFAULT_GRANULARITY, DEFAULT_MERGE, DEFAULT_MIN_AREA_SHARE, DEFAULT_MIN_RECALL,
+    DEFAULT_FRAGMENT_SHARE, DEFAULT_GRANULARITY, DEFAULT_MERGE, DEFAULT_MIN_AREA_SHARE, DEFAULT_MIN_RECALL,
     DEFAULT_REDRAWS, DEFAULT_SAM3_THRESHOLD, DEFAULT_SAMPLES, GRANULARITY,
     PipelineOptions, add_cli_arguments, check_cli, floors,
 )
@@ -44,9 +45,14 @@ class PipelineDefaultsTest(unittest.TestCase):
         self.assertEqual(DEFAULT_MIN_RECALL, VOTE_MIN_RECALL)
         self.assertEqual(DEFAULT_SAM3_THRESHOLD, BANK_THRESHOLD)
         self.assertEqual(DEFAULT_MIN_AREA_SHARE, XPART_MIN_AREA_SHARE)
+        self.assertEqual(DEFAULT_FRAGMENT_SHARE, VOTE_FRAGMENT_SHARE)
+        self.assertEqual(options.fragment_share, DEFAULT_FRAGMENT_SHARE)
         self.assertEqual(options.redraws, DEFAULT_REDRAWS)
         self.assertEqual(options.merge, DEFAULT_MERGE)
         self.assertEqual(options.complete, DEFAULT_COMPLETE)
+        self.assertEqual(DEFAULT_COMPLETE, "hybrid")
+        self.assertIn("hybrid", options.public()["switches"]["complete"])
+        self.assertIn("fragments", options.public()["switches"]["merge"])
         self.assertEqual(options.condition, DEFAULT_CONDITION)
         self.assertEqual(options.flat_paint, DEFAULT_FLAT_PAINT)
         self.assertEqual(options.view_azimuths, "45,225")

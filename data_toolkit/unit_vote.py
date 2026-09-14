@@ -58,18 +58,83 @@ DEFAULT_MIN_VISIBLE_PIXELS = 50
 # relative to the largest of them. Mickey's whiskers are 4% of the head; the hands,
 # which also touch the head, are 21% and stay with the body.
 DEFAULT_HANG_SHARE = 0.1
+# merge=fragments: a unit below this share of the surface is a speck, not a part.
+# Hands and ears sit above it; meet slivers and name-merge chips sit below.
+DEFAULT_FRAGMENT_SHARE = 0.01
 
 
 def unit_neighbors(unit_of_face, adjacency):
     """Undirected neighbour list: unit -> sorted unique neighboring unit ids."""
-    n_units = int(unit_of_face.max()) + 1
+    return [sorted(weights) for weights in unit_boundary_counts(unit_of_face, adjacency)]
+
+
+def unit_boundary_counts(unit_of_face, adjacency):
+    """unit -> {neighbor: shared-edge count}."""
+    n_units = int(unit_of_face.max()) + 1 if len(unit_of_face) else 0
+    counts = [{} for _ in range(n_units)]
+    if n_units == 0 or len(adjacency) == 0:
+        return counts
     left, right = unit_of_face[adjacency[:, 0]], unit_of_face[adjacency[:, 1]]
     cross = left != right
-    neighbors = [[] for _ in range(n_units)]
     for a, b in zip(left[cross], right[cross]):
-        neighbors[int(a)].append(int(b))
-        neighbors[int(b)].append(int(a))
-    return [sorted(set(row)) for row in neighbors]
+        a, b = int(a), int(b)
+        counts[a][b] = counts[a].get(b, 0) + 1
+        counts[b][a] = counts[b].get(a, 0) + 1
+    return counts
+
+
+def _is_unnamed(name):
+    return name is None or name == "" or name == "unnamed"
+
+
+def fold_fragment_units(unit_of_face, face_areas, adjacency, names=None,
+                        max_share=DEFAULT_FRAGMENT_SHARE):
+    """Absorb specks; leave every real geometric cut alone.
+
+    A unit folds only when it covers less than `max_share` of the surface *and*
+    it is not a small-but-named part (button, ear): either it has no name, or a
+    neighbour already has the same name. Two large units that share a name stay
+    two units -- that is the whole point versus merge=name.
+    """
+    units = np.asarray(unit_of_face, dtype=np.int64).copy()
+    areas = np.asarray(face_areas, dtype=np.float64)
+    n = int(units.max()) + 1 if len(units) else 0
+    labels = list(names) if names is not None else [None] * n
+    if len(labels) < n:
+        labels.extend([None] * (n - len(labels)))
+    if n <= 1 or max_share is None or float(max_share) <= 0:
+        return units, labels[:n], 0
+    total = float(areas.sum()) or 1.0
+    absorbed = 0
+    while True:
+        present = [int(u) for u in np.unique(units)]
+        if len(present) <= 1:
+            break
+        area = {u: float(areas[units == u].sum()) for u in present}
+        counts = unit_boundary_counts(units, adjacency)
+        small = sorted(
+            (u for u in present if area[u] / total < max_share),
+            key=lambda u: area[u])
+        folded = False
+        for src in small:
+            neighbors = [dst for dst in counts[src] if (units == dst).any()]
+            if not neighbors:
+                continue
+            mine = labels[src]
+            same = [dst for dst in neighbors if not _is_unnamed(mine) and labels[dst] == mine]
+            if not same and not _is_unnamed(mine):
+                continue
+            dest = max(same or neighbors, key=lambda dst: counts[src][dst])
+            units[units == src] = dest
+            absorbed += 1
+            folded = True
+            break
+        if not folded:
+            break
+    kept = [int(u) for u in np.unique(units)]
+    remap = {old: new for new, old in enumerate(kept)}
+    compact = np.array([remap[int(u)] for u in units], dtype=np.int64)
+    return compact, [labels[old] for old in kept], absorbed
 
 
 def split_units(mesh, atoms, adjacency, min_unit_faces=DEFAULT_MIN_UNIT_FACES):

@@ -5,6 +5,7 @@ import numpy as np
 
 from data_toolkit import unit_vote
 from data_toolkit.lift_sam3 import MaskSet
+from data_toolkit.unit_vote import fold_fragment_units
 
 
 def two_boxes():
@@ -97,6 +98,50 @@ class HangOffTest(unittest.TestCase):
         self.assertEqual(
             self.assign([[1, 0], [0, 0]], [[1], [0]], [1000, 400]),
             ["head", "torso"])
+
+
+class FoldFragmentsTest(unittest.TestCase):
+    """A path of faces: two large same-name parts, a same-name chip, a named speck."""
+
+    def fold(self, faces, names, max_share=0.05):
+        units = np.concatenate(
+            [np.full(count, unit, dtype=np.int64) for unit, count in enumerate(faces)])
+        adjacency = np.stack([np.arange(len(units) - 1), np.arange(1, len(units))], axis=1)
+        areas = np.ones(len(units), dtype=np.float64)
+        return fold_fragment_units(units, areas, adjacency, names, max_share=max_share)
+
+    def test_same_name_chip_folds_large_twins_stay_apart(self):
+        # 40 + 2 + 40 faces, all named body: the chip joins a neighbour, the two
+        # large bodies stay two nodes (merge=name would weld all three).
+        compact, names, absorbed = self.fold([40, 2, 40], ["body", "body", "body"])
+        self.assertEqual(absorbed, 1)
+        self.assertEqual(len(np.unique(compact)), 2)
+        self.assertEqual(names, ["body", "body"])
+
+    def test_a_small_uniquely_named_part_is_kept(self):
+        compact, names, absorbed = self.fold([50, 2, 50], ["body", "button", "body"])
+        self.assertEqual(absorbed, 0)
+        self.assertEqual(len(np.unique(compact)), 3)
+        self.assertEqual(names, ["body", "button", "body"])
+
+    def test_an_unnamed_speck_joins_its_neighbour(self):
+        compact, names, absorbed = self.fold([50, 2, 50], ["body", None, "leg"])
+        self.assertEqual(absorbed, 1)
+        self.assertEqual(len(np.unique(compact)), 2)
+        self.assertEqual(set(names), {"body", "leg"})
+
+    def test_a_tighter_share_keeps_the_same_chip(self):
+        # 2 / 82 ≈ 2.4%. Folds at 5%, stays at 1%.
+        _, _, absorbed_loose = self.fold([40, 2, 40], ["body", "body", "body"], max_share=0.05)
+        _, _, absorbed_tight = self.fold([40, 2, 40], ["body", "body", "body"], max_share=0.01)
+        self.assertEqual(absorbed_loose, 1)
+        self.assertEqual(absorbed_tight, 0)
+
+    def test_zero_share_folds_nothing(self):
+        compact, names, absorbed = self.fold([40, 2, 40], ["body", "body", "body"], max_share=0)
+        self.assertEqual(absorbed, 0)
+        self.assertEqual(len(np.unique(compact)), 3)
+        self.assertEqual(names, ["body", "body", "body"])
 
 
 if __name__ == "__main__":

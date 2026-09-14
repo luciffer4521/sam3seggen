@@ -4,8 +4,8 @@ import numpy as np
 import trimesh
 
 from xpart_complete import (
-    box_escape, part_surface_condition, source_frame_transform, to_source_frame,
-    xpart_normalization,
+    box_escape, group_solids, part_surface_condition, source_frame_transform,
+    to_source_frame, xpart_normalization,
 )
 
 
@@ -99,6 +99,31 @@ class BoxEscapeTest(unittest.TestCase):
     def test_overshoot_at_both_ends_of_an_axis_adds_up(self):
         box = bounds([0.0, 0.0, 0.0], [2.0, 2.0, 2.0])
         self.assertAlmostEqual(box_escape(bounds([-1.0, 0.0, 0.0], [3.0, 2.0, 2.0]), box), 1.0)
+
+
+class GroupSolidsTest(unittest.TestCase):
+    """Named groups are repaired as instances, then put back together."""
+
+    def test_two_hands_are_one_node_again_after_repair(self):
+        left = trimesh.creation.box(extents=[0.2, 0.2, 0.2])
+        left.apply_translation([-1.0, 0.0, 0.0])
+        right = trimesh.creation.box(extents=[0.2, 0.2, 0.2])
+        right.apply_translation([1.0, 0.0, 0.0])
+        head = trimesh.creation.box(extents=[0.3, 0.3, 0.3])
+        grouped = group_solids(
+            ["part_03_hand", "part_00_head", "part_03_hand"],
+            [left, head, right],
+        )
+        self.assertEqual([name for name, _ in grouped], ["part_03_hand", "part_00_head"])
+        hands = grouped[0][1]
+        self.assertGreater(hands.extents[0], 1.5)
+        self.assertEqual(len(hands.faces), len(left.faces) + len(right.faces))
+
+    def test_a_missing_solid_does_not_drop_the_rest_of_its_group(self):
+        kept = trimesh.creation.box(extents=[0.2, 0.2, 0.2])
+        grouped = group_solids(["hand", "hand"], [None, kept])
+        self.assertEqual([name for name, _ in grouped], ["hand"])
+        self.assertEqual(len(grouped[0][1].faces), len(kept.faces))
 
 
 if __name__ == "__main__":

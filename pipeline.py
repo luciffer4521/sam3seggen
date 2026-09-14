@@ -4,7 +4,8 @@
 
 Geometry decides every boundary; language only names. Stages 3 and 6 cost GPU minutes,
 the rest is seconds once the renders are cached. `--merge off` stops after units;
-`--complete off` (the default) stops after the open, textured parts.glb.
+`--complete off` stops after the open, textured parts.glb; the default is
+`--complete hybrid` (X-Part, then HoloPart on a large solid that left its box).
 
 This module is the contract. segment_parts.py / merge_parts.py / serve_api.py read their
 defaults and switches from here so a knob cannot drift between the CLI and the API.
@@ -22,16 +23,16 @@ STAGES = (
     ("split", True, "intersect N prompt-free full_seg samples into atoms"),
     ("units", True, "connected components + fuse remesh inner shells"),
     ("merge", False, "vote names onto units; gated by --merge"),
-    ("complete", False, "X-Part closes each part, then bake; gated by --complete"),
+    ("complete", False, "close each part (hybrid by default), then bake; gated by --complete"),
 )
 
 # --- enums -----------------------------------------------------------------
 
 FLAT_PAINT_MODES = ("auto", "on", "off")
-MERGE_MODES = ("name", "unit")          # merge_parts; segment_parts also accepts "off"
-MERGE_MODES_ALL = ("name", "unit", "off")
+MERGE_MODES = ("name", "unit", "fragments")  # merge_parts; segment_parts also accepts "off"
+MERGE_MODES_ALL = ("name", "unit", "off", "fragments")
 MIRROR_MODES = ("auto", "none", "x", "y", "z")
-COMPLETE_MODES = ("off", "boxes", "full")
+COMPLETE_MODES = ("off", "boxes", "full", "hybrid")
 CONDITION_MODES = ("surface", "box")
 
 GRANULARITY = {
@@ -55,9 +56,10 @@ DEFAULT_RESOLUTION = 512
 DEFAULT_SAM3_THRESHOLD = 0.4            # BANK_THRESHOLD; 0.3 is the no-bank painter
 DEFAULT_FLAT_PAINT = "auto"
 DEFAULT_MERGE = "name"
-DEFAULT_COMPLETE = "off"
+DEFAULT_COMPLETE = "hybrid"
 DEFAULT_CONDITION = "surface"
 DEFAULT_MIN_AREA_SHARE = 0.005
+DEFAULT_FRAGMENT_SHARE = 0.01
 DEFAULT_REDRAWS = 2
 DEFAULT_OCTREE_RESOLUTION = 512
 DEFAULT_SEED = 42
@@ -72,6 +74,13 @@ DEFAULT_XPART_ROOT = os.environ.get(
     "SEGVIGEN_XPART_ROOT", "/root/autodl-tmp/Hunyuan3D-Part/XPart")
 DEFAULT_XPART_WEIGHTS = os.environ.get(
     "SEGVIGEN_XPART_WEIGHTS", "/root/autodl-tmp/Hunyuan3D-Part/weights")
+DEFAULT_PY_HOLOPART = os.environ.get(
+    "SEGVIGEN_PY_HOLOPART", "/root/autodl-tmp/envs/holopart/bin/python")
+DEFAULT_HOLOPART_ROOT = os.environ.get(
+    "SEGVIGEN_HOLOPART_ROOT", "/root/autodl-tmp/HoloPart")
+DEFAULT_HOLOPART_WEIGHTS = os.environ.get(
+    "SEGVIGEN_HOLOPART_WEIGHTS",
+    "/root/autodl-tmp/HoloPart/pretrained_weights/HoloPart")
 
 
 def floors(granularity=DEFAULT_GRANULARITY, min_atom_faces=None, min_unit_faces=None):
@@ -110,6 +119,7 @@ class PipelineOptions:
     complete: str = DEFAULT_COMPLETE
     condition: str = DEFAULT_CONDITION
     min_area_share: float = DEFAULT_MIN_AREA_SHARE
+    fragment_share: float = DEFAULT_FRAGMENT_SHARE
     redraws: int = DEFAULT_REDRAWS
     octree_resolution: int = DEFAULT_OCTREE_RESOLUTION
     seed: int = DEFAULT_SEED
@@ -122,6 +132,9 @@ class PipelineOptions:
     py_xpart: str | None = None
     xpart_root: str = DEFAULT_XPART_ROOT
     xpart_weights: str = DEFAULT_XPART_WEIGHTS
+    py_holopart: str | None = None
+    holopart_root: str = DEFAULT_HOLOPART_ROOT
+    holopart_weights: str = DEFAULT_HOLOPART_WEIGHTS
 
     def resolved_floors(self):
         return floors(self.granularity, self.min_atom_faces, self.min_unit_faces)
@@ -144,7 +157,8 @@ class PipelineOptions:
             "defaults": {
                 **{f.name: getattr(self, f.name) for f in fields(self)
                    if f.name not in ("py_xpart", "xpart_root", "xpart_weights",
-                                     "concept_bank")},
+                                     "py_holopart", "holopart_root",
+                                     "holopart_weights", "concept_bank")},
                 "min_atom_faces": atom,
                 "min_unit_faces": unit,
                 "color_tol": DEFAULT_COLOR_TOL if self.color_tol is None else self.color_tol,
@@ -177,10 +191,14 @@ class PipelineOptions:
             "py_xpart": self.py_xpart,
             "xpart_root": self.xpart_root,
             "xpart_weights": self.xpart_weights,
+            "py_holopart": self.py_holopart,
+            "holopart_root": self.holopart_root,
+            "holopart_weights": self.holopart_weights,
             "octree_resolution": self.octree_resolution,
             "seed": self.seed,
             "condition": self.condition,
             "min_area_share": self.min_area_share,
+            "fragment_share": self.fragment_share,
             "redraws": self.redraws,
             "reuse": self.reuse,
             "strict_parts": self.strict_parts,
@@ -238,6 +256,7 @@ class PipelineOptions:
             complete=getattr(args, "complete", DEFAULT_COMPLETE),
             condition=getattr(args, "condition", DEFAULT_CONDITION),
             min_area_share=getattr(args, "min_area_share", DEFAULT_MIN_AREA_SHARE),
+            fragment_share=getattr(args, "fragment_share", DEFAULT_FRAGMENT_SHARE),
             redraws=getattr(args, "redraws", DEFAULT_REDRAWS),
             octree_resolution=getattr(args, "octree_resolution", DEFAULT_OCTREE_RESOLUTION),
             seed=getattr(args, "seed", DEFAULT_SEED),
@@ -251,6 +270,9 @@ class PipelineOptions:
             py_xpart=getattr(args, "py_xpart", None),
             xpart_root=getattr(args, "xpart_root", DEFAULT_XPART_ROOT),
             xpart_weights=getattr(args, "xpart_weights", DEFAULT_XPART_WEIGHTS),
+            py_holopart=getattr(args, "py_holopart", None),
+            holopart_root=getattr(args, "holopart_root", DEFAULT_HOLOPART_ROOT),
+            holopart_weights=getattr(args, "holopart_weights", DEFAULT_HOLOPART_WEIGHTS),
         )
 
 
@@ -286,16 +308,21 @@ def add_cli_arguments(parser, *, split=True, merge_off=True):
     merge_choices = MERGE_MODES_ALL if merge_off else MERGE_MODES
     parser.add_argument("--merge", default=DEFAULT_MERGE, choices=merge_choices,
                         help="name = one node per prompt. unit = one node per voted unit. "
+                             "fragments = keep the geometric split, fold only specks. "
                              + ("off = stop after the units." if merge_off else ""))
     parser.add_argument("--flat_paint", default=DEFAULT_FLAT_PAINT, choices=FLAT_PAINT_MODES,
                         help="Temporary flat colour for a model the renders show as grey")
     parser.add_argument("--complete", default=DEFAULT_COMPLETE, choices=COMPLETE_MODES,
-                        help="off | boxes (prompts only) | full (regenerate + bake)")
+                        help="off | boxes (prompts only) | full (X-Part only) | "
+                             "hybrid (X-Part, HoloPart on large box-escapees; default)")
     parser.add_argument("--condition", default=DEFAULT_CONDITION, choices=CONDITION_MODES,
                         help="surface = faces the split assigned; box = whatever is in the box")
     parser.add_argument("--min_area_share", type=float, default=DEFAULT_MIN_AREA_SHARE,
                         help="Fold an X-Part component below this share of the surface "
                              "into its nearest neighbour instead of generating it alone")
+    parser.add_argument("--fragment_share", type=float, default=DEFAULT_FRAGMENT_SHARE,
+                        help="merge=fragments: fold a unit below this share of the surface "
+                             "into a neighbour. Smaller keeps more pieces.")
     parser.add_argument("--redraws", type=int, default=DEFAULT_REDRAWS,
                         help="Times to redraw an X-Part solid that overruns its box")
     parser.add_argument("--no_reuse", action="store_true",
@@ -308,7 +335,8 @@ def add_cli_arguments(parser, *, split=True, merge_off=True):
                              "of skipping that prompt and finishing the rest")
     parser.add_argument("--no_texture", action="store_true",
                         help="Skip the Blender bake; parts get a flat placeholder colour")
-    parser.add_argument("--texture_size", type=int, default=DEFAULT_TEXTURE_SIZE)
+    parser.add_argument("--texture_size", type=int, default=DEFAULT_TEXTURE_SIZE,
+                        help="Small-part bake atlas; larger parts scale up to 8K")
     parser.add_argument("--sam3_threshold", type=float, default=DEFAULT_SAM3_THRESHOLD)
     parser.add_argument("--concept_bank", default=DEFAULT_CONCEPT_BANK,
                         help="SAM3 v3 bank.pt. Empty = raw SAM3.")
@@ -317,6 +345,9 @@ def add_cli_arguments(parser, *, split=True, merge_off=True):
     parser.add_argument("--py_xpart", default=None, help=f"default: {DEFAULT_PY_XPART}")
     parser.add_argument("--xpart_root", default=DEFAULT_XPART_ROOT)
     parser.add_argument("--xpart_weights", default=DEFAULT_XPART_WEIGHTS)
+    parser.add_argument("--py_holopart", default=None, help=f"default: {DEFAULT_PY_HOLOPART}")
+    parser.add_argument("--holopart_root", default=DEFAULT_HOLOPART_ROOT)
+    parser.add_argument("--holopart_weights", default=DEFAULT_HOLOPART_WEIGHTS)
     parser.add_argument("--octree_resolution", type=int, default=DEFAULT_OCTREE_RESOLUTION)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     return parser

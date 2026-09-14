@@ -21,6 +21,10 @@ export SEGVIGEN_PY_SAM3=/root/autodl-tmp/envs/sam3/bin/python
 export SEGVIGEN_PY_XPART=/root/autodl-tmp/envs/xpart/bin/python
 export SEGVIGEN_XPART_ROOT=/root/autodl-tmp/Hunyuan3D-Part/XPart
 export SEGVIGEN_XPART_WEIGHTS=/root/autodl-tmp/Hunyuan3D-Part/weights
+# HoloPart swaps in only when a large X-Part solid leaves its box (complete=hybrid).
+export SEGVIGEN_PY_HOLOPART=/root/autodl-tmp/envs/holopart/bin/python
+export SEGVIGEN_HOLOPART_ROOT=/root/autodl-tmp/HoloPart
+export SEGVIGEN_HOLOPART_WEIGHTS=/root/autodl-tmp/HoloPart/pretrained_weights/HoloPart
 export SEGVIGEN_SAM3="$ROOT/weights/facebook/sam3"
 export SEGVIGEN_DINOV3="$ROOT/weights/facebook/dinov3-vitl16-pretrain-lvd1689m"
 # briaai/RMBG-2.0 is gated; public BiRefNet is a drop-in via SEGVIGEN_RMBG

@@ -1,0 +1,106 @@
+"""Regenerate open part instances as closed solids with HoloPart.
+
+Runs in the HoloPart venv and imports nothing from pipeline. The input glb is the
+per-instance open surfaces X-Part already wrote (open_instances.glb): one node per
+instance, names ``00_head``. Output keeps those names so hybrid_complete can pair them.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
+import numpy as np
+import trimesh
+
+ROOT = os.path.dirname(os.path.abspath(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+
+from xpart_complete import load_part_nodes
+
+DEFAULT_HOLOPART_ROOT = os.environ.get(
+    "SEGVIGEN_HOLOPART_ROOT", "/root/autodl-tmp/HoloPart")
+DEFAULT_HOLOPART_WEIGHTS = os.environ.get(
+    "SEGVIGEN_HOLOPART_WEIGHTS",
+    "/root/autodl-tmp/HoloPart/pretrained_weights/HoloPart")
+
+
+def instance_sort_key(name):
+    prefix = str(name).split("_", 1)[0]
+    return (int(prefix), name) if prefix.isdigit() else (10**9, name)
+
+
+def write_ordered(parts_glb, dest):
+    """Re-export so HoloPart's dict iteration matches 00, 01, 02, ..."""
+    scene = trimesh.Scene()
+    names = []
+    for name, mesh in sorted(load_part_nodes(parts_glb), key=lambda item: instance_sort_key(item[0])):
+        scene.add_geometry(mesh, geom_name=name)
+        names.append(name)
+    if not names:
+        raise SystemExit(f"no mesh found in {parts_glb}")
+    scene.export(dest)
+    return names
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--parts", required=True,
+                        help="Open instances glb (one node per instance)")
+    parser.add_argument("--out_dir", required=True)
+    parser.add_argument("--holopart_root", default=DEFAULT_HOLOPART_ROOT)
+    parser.add_argument("--weights", default=DEFAULT_HOLOPART_WEIGHTS)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num_inference_steps", type=int, default=25)
+    parser.add_argument("--guidance_scale", type=float, default=3.5)
+    parser.add_argument("--batch_size", type=int, default=1)
+    parser.add_argument("--num_chunks", type=int, default=20000)
+    args = parser.parse_args()
+
+    out_dir = os.path.abspath(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    ordered = os.path.join(out_dir, "holopart_input.glb")
+    names = write_ordered(os.path.abspath(args.parts), ordered)
+
+    holopart_root = os.path.abspath(args.holopart_root)
+    if holopart_root not in sys.path:
+        sys.path.insert(0, holopart_root)
+    os.chdir(holopart_root)
+
+    import torch
+    from holopart.pipelines.pipeline_holopart import HoloPartPipeline
+    from scripts.inference_holopart import prepare_data, run_holopart
+
+    weights = os.path.abspath(args.weights)
+    if not os.path.isdir(weights):
+        raise SystemExit(f"HoloPart weights not found: {weights}")
+    print(f"[holopart] {len(names)} instances from {os.path.basename(args.parts)}")
+    pipe = HoloPartPipeline.from_pretrained(weights).to("cuda", torch.float16)
+    batch = prepare_data(ordered, device="cuda")
+    scene = run_holopart(
+        pipe,
+        batch=batch,
+        batch_size=args.batch_size,
+        seed=args.seed,
+        num_inference_steps=args.num_inference_steps,
+        guidance_scale=args.guidance_scale,
+        num_chunks=args.num_chunks,
+        device="cuda",
+    )
+    out = trimesh.Scene()
+    meshes = list(scene.geometry.values())
+    if len(meshes) != len(names):
+        raise SystemExit(
+            f"HoloPart returned {len(meshes)} solids for {len(names)} instances")
+    for name, mesh in zip(names, meshes):
+        out.add_geometry(mesh, geom_name=name)
+        ext = np.asarray(mesh.bounds[1] - mesh.bounds[0])
+        print(f"  {name:<18} faces={len(mesh.faces)} ext={np.round(ext, 3)}")
+    dest = os.path.join(out_dir, "holopart_instances.glb")
+    out.export(dest)
+    print(f"saved {dest}")
+
+
+if __name__ == "__main__":
+    main()

@@ -6,7 +6,7 @@ re-run while deciding what the parts should be called. Point this at a split dir
 (`segment_parts.py --merge off`) and re-run it with different prompts:
 
     python segment_parts.py --glb robot.glb --merge off --out split/units.glb
-    python merge_parts.py --glb robot.glb --split split/work --prompts head torso arm ... \
+    python merge_parts.py --glb robot.glb --split split/work --prompts "head, torso, arm" \
         --out named/parts.glb
 
 Renders and masks are cached in the split directory, so a second run with the same prompts
@@ -32,12 +32,13 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from pipeline import (
-    COMPLETE_MODES, CONDITION_MODES, DEFAULT_CONDITION, DEFAULT_CONCEPT_BANK,
-    DEFAULT_MIN_AREA_SHARE, DEFAULT_OCTREE_RESOLUTION, DEFAULT_PY_XPART,
-    DEFAULT_RADIUS, DEFAULT_REDRAWS, DEFAULT_RESOLUTION, DEFAULT_SAM3_THRESHOLD,
-    DEFAULT_TEXTURE_SIZE, DEFAULT_VIEW_AZIMUTHS, DEFAULT_VIEW_ELEVATIONS,
-    DEFAULT_XPART_ROOT, DEFAULT_XPART_WEIGHTS, FLAT_PAINT_MODES, MERGE_MODES,
-    PipelineOptions, add_cli_arguments, check_cli,
+    COMPLETE_MODES, CONDITION_MODES, DEFAULT_COMPLETE, DEFAULT_CONDITION,
+    DEFAULT_CONCEPT_BANK, DEFAULT_HOLOPART_ROOT, DEFAULT_HOLOPART_WEIGHTS,
+    DEFAULT_FRAGMENT_SHARE, DEFAULT_MIN_AREA_SHARE, DEFAULT_OCTREE_RESOLUTION, DEFAULT_PY_HOLOPART,
+    DEFAULT_PY_XPART, DEFAULT_RADIUS, DEFAULT_REDRAWS, DEFAULT_RESOLUTION,
+    DEFAULT_SAM3_THRESHOLD, DEFAULT_TEXTURE_SIZE, DEFAULT_VIEW_AZIMUTHS,
+    DEFAULT_VIEW_ELEVATIONS, DEFAULT_XPART_ROOT, DEFAULT_XPART_WEIGHTS,
+    FLAT_PAINT_MODES, MERGE_MODES, PipelineOptions, add_cli_arguments, check_cli,
 )
 from prompt_specs import normalize_part_specs, part_names, validate_named_rows, validate_target_name
 from segment_api import DEFAULT_PY_SAM3, DEFAULT_SAM3, _run
@@ -267,14 +268,18 @@ def merge_parts(
     concept_bank=DEFAULT_CONCEPT_BANK,
     flat_paint="auto",
     units=None,
-    complete="off",
+    complete=DEFAULT_COMPLETE,
     py_xpart=None,
     xpart_root=DEFAULT_XPART_ROOT,
     xpart_weights=DEFAULT_XPART_WEIGHTS,
+    py_holopart=None,
+    holopart_root=DEFAULT_HOLOPART_ROOT,
+    holopart_weights=DEFAULT_HOLOPART_WEIGHTS,
     octree_resolution=DEFAULT_OCTREE_RESOLUTION,
     seed=42,
     condition=DEFAULT_CONDITION,
     min_area_share=DEFAULT_MIN_AREA_SHARE,
+    fragment_share=DEFAULT_FRAGMENT_SHARE,
     redraws=DEFAULT_REDRAWS,
     reuse=True,
     strict_parts=False,
@@ -287,15 +292,19 @@ def merge_parts(
         split_dir: a segment_parts.py work directory (sample_00/seg.glb + atoms.npy).
         merge: "name" fuses everything the vote gave the same name into one node; "unit"
             keeps one node per unit, named `<index>_<voted name>`, so a wrong name can be
-            traced to a unit before it is merged away.
+            traced to a unit before it is merged away; "fragments" keeps that split and
+            only folds specks (tiny, unnamed, or same-name chips) back into a neighbour.
+        fragment_share: with merge=fragments, a unit below this share of the surface
+            is a speck. Smaller keeps more pieces.
         unassigned_to: the part absorbing units no concept claimed. Without it those faces
             are dropped from the output.
         flat_paint: "auto" gives a model the renders show as grey a temporary flat colour
             before prompting, because SAM3 finds nothing on an untextured one.
         units: the split's shell-fused unit ids. Left None they are recomputed here, which
             is correct but wasteful when the caller just built them.
-        complete: hand the parts to X-Part afterwards. "boxes" only writes the prompts and
-            a preview (cheap, no GPU); "full" also regenerates each part as a closed solid.
+        complete: close the parts afterwards. "boxes" only writes the prompts and a
+            preview (cheap, no GPU); "full" is X-Part only; "hybrid" (default) runs
+            X-Part then swaps a large box-escaping solid for HoloPart.
         reuse: keep the renders and, for these exact prompts, the masks already in
             `split_dir`. Turn off to re-render (e.g. after editing the source model).
 
@@ -304,9 +313,10 @@ def merge_parts(
     import numpy as np
 
     from data_toolkit.lift_sam3 import load_cameras, load_masks
-    from data_toolkit.parts_rebake import load_single_mesh
+    from data_toolkit.parts_rebake import load_single_mesh, welded_face_adjacency
     from data_toolkit.unit_vote import (
-        DEFAULT_MIN_RECALL, DEFAULT_MIN_UNIT_FACES, print_report, vote,
+        DEFAULT_MIN_RECALL, DEFAULT_MIN_UNIT_FACES, fold_fragment_units,
+        print_report, vote,
     )
 
     if merge not in MERGE_MODES:
@@ -344,7 +354,17 @@ def merge_parts(
         min_unit_faces, min_recall, units=units,
     )
     print_report(rows, list(dict.fromkeys(mask_set.owners)))
-    if merge == "unit":
+    if merge == "fragments":
+        names_by_unit = [row["name"] for row in rows]
+        units, folded_names, absorbed = fold_fragment_units(
+            units, reference.area_faces, welded_face_adjacency(reference), names_by_unit,
+            max_share=fragment_share)
+        print(f"[merge] fragments: share<{fragment_share:g}, absorbed {absorbed} specks -> "
+              f"{int(units.max()) + 1 if len(units) else 0} units kept")
+        label_names = [f"{index:02d}_{name or 'unnamed'}"
+                       for index, name in enumerate(folded_names)]
+        labels = units
+    elif merge == "unit":
         # nothing is dropped here, not even units no concept claimed: this output exists
         # to be looked at, and a missing piece is the hardest kind to notice.
         label_names = [f"{row['unit']:02d}_{row['name'] or 'unnamed'}" for row in rows]
@@ -367,7 +387,8 @@ def merge_parts(
     print(f"saved {out_glb} ({len(manifest)} parts)")
     complete_parts(glb, out_glb, os.path.join(out_dir, "complete"), complete,
                    py_xpart, xpart_root, xpart_weights, octree_resolution, seed,
-                   condition, with_texture, texture_size, min_area_share, redraws)
+                   condition, with_texture, texture_size, min_area_share, redraws,
+                   py_holopart, holopart_root, holopart_weights)
     return manifest
 
 
@@ -395,15 +416,15 @@ def complete_parts(glb, parts_glb, out_dir, mode="boxes", py_xpart=None,
                    xpart_root=DEFAULT_XPART_ROOT, model_path=DEFAULT_XPART_WEIGHTS,
                    octree_resolution=512, seed=42, condition=DEFAULT_CONDITION,
                    with_texture=True, texture_size=DEFAULT_TEXTURE_SIZE,
-                   min_area_share=DEFAULT_MIN_AREA_SHARE, redraws=DEFAULT_REDRAWS):
-    """Hand the parts to X-Part so it can close them into solids.
+                   min_area_share=DEFAULT_MIN_AREA_SHARE, redraws=DEFAULT_REDRAWS,
+                   py_holopart=None, holopart_root=DEFAULT_HOLOPART_ROOT,
+                   holopart_weights=DEFAULT_HOLOPART_WEIGHTS):
+    """Close the open parts. Default is hybrid: X-Part, then HoloPart on large escapees.
 
     Splitting one shell leaves every part open where it was cut. X-Part regenerates each
-    as a watertight shape from the whole model plus a prompt, so the cut is healed by
-    generation rather than by capping geometry we never had. The prompt is a box and, by
-    default, the surface our split assigned to that part -- a box alone also contains
-    whatever else passes through it. See xpart_complete.py -- it runs in its own venv and
-    imports nothing from here, hence the dispatch.
+    as a watertight shape from the whole model plus a prompt. A large solid that still
+    overruns its box is replaced by that instance's HoloPart draw. See xpart_complete.py
+    and holopart_complete.py -- each runs in its own venv, hence the dispatch.
     """
     if mode not in COMPLETE_MODES:
         raise ValueError(f"complete must be one of {COMPLETE_MODES}, got {mode!r}")
@@ -426,8 +447,10 @@ def complete_parts(glb, parts_glb, out_dir, mode="boxes", py_xpart=None,
                     "--condition", condition,
                     "--min_area_share", min_area_share, "--redraws", redraws]
     _run(command)
+    if mode == "hybrid":
+        _hybrid_swap(out_dir, seed, py_holopart, holopart_root, holopart_weights)
     closed = os.path.join(out_dir, "xpart_parts.glb")
-    if mode == "full" and with_texture and os.path.isfile(closed):
+    if mode in ("full", "hybrid") and with_texture and os.path.isfile(closed):
         raw = os.path.join(out_dir, "xpart_parts_raw.glb")
         os.replace(closed, raw)
         print("[complete] baking source albedo onto the closed solids ...")
@@ -435,12 +458,40 @@ def complete_parts(glb, parts_glb, out_dir, mode="boxes", py_xpart=None,
             sys.executable, os.path.join(ROOT, "data_toolkit", "parts_rebake.py"),
             "--completed", raw, "--source_glb", glb, "--out_dir", out_dir,
             "--combined_name", "xpart_parts.glb", "--texture_size", texture_size,
-            # Generated solids only approximate the source; the split's 0.02/0.05 cage
-            # leaves most of an X-Part surface unhit.
+            # Ceiling only: bake_completed tightens per part from the measured gap.
             "--cage_extrusion", "0.05", "--max_ray_distance", "0.15",
         ])
     with open(os.path.join(out_dir, "boxes.json"), "r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _hybrid_swap(out_dir, seed, py_holopart, holopart_root, holopart_weights):
+    """Run HoloPart only if a large X-Part solid left its box; assemble either way."""
+    from hybrid_complete import apply_hybrid, decisions_from_instances
+
+    instances = os.path.join(out_dir, "xpart_instances.glb")
+    boxes_path = os.path.join(out_dir, "boxes.json")
+    if not os.path.isfile(instances) or not os.path.isfile(boxes_path):
+        raise SystemExit("hybrid repair needs xpart_instances.glb and boxes.json")
+    with open(boxes_path, "r", encoding="utf-8") as handle:
+        boxes = json.load(handle)
+    decisions = decisions_from_instances(instances, boxes)
+    holopart_glb = None
+    if any(row["backend"] == "holopart" for row in decisions):
+        open_glb = os.path.join(out_dir, "open_instances.glb")
+        if not os.path.isfile(open_glb):
+            raise SystemExit("hybrid repair needs open_instances.glb from X-Part")
+        print("[complete] large box-escape; running HoloPart on the open instances ...")
+        _run([
+            py_holopart or DEFAULT_PY_HOLOPART,
+            os.path.join(ROOT, "holopart_complete.py"),
+            "--parts", open_glb, "--out_dir", out_dir,
+            "--holopart_root", holopart_root,
+            "--weights", holopart_weights,
+            "--seed", seed,
+        ])
+        holopart_glb = os.path.join(out_dir, "holopart_instances.glb")
+    apply_hybrid(out_dir, holopart_glb)
 
 
 def main():
@@ -452,7 +503,8 @@ def main():
     parser.add_argument("--split", required=True,
                         help="segment_parts.py work directory (sample_00/seg.glb + atoms.npy)")
     parser.add_argument("--prompts", nargs="+", required=True,
-                        help="One entry per output part; join concepts with '+' to merge them")
+                        help="One comma-separated sentence: 'head, torso, arm'. "
+                             "'+' still merges concepts ('body=head+face').")
     parser.add_argument("--out", required=True, help="Output glb, one node per part")
     parser.add_argument("--mesh", default=None, help="Override the reference seg.glb")
     parser.add_argument("--atoms", default=None, help="Override the atom label npy")

@@ -29,7 +29,7 @@ guidance overlays if prompts were given -- so the two halves can be looked at, a
 about, separately:
 
     python segment_parts.py --glb robot.glb --merge off --out split/units.glb
-    python merge_parts.py --glb robot.glb --split split/work --prompts head torso arm \
+    python merge_parts.py --glb robot.glb --split split/work --prompts "head, torso, arm" \
         --out named/parts.glb
 
 Why over-segment first: full_seg has no granularity control and a single sample fuses
@@ -51,17 +51,20 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
-from merge_parts import canonical_prompts, export_labelled, guidance, merge_parts
+from merge_parts import (
+    canonical_prompts, complete_parts, export_labelled, guidance, merge_parts,
+)
 from pipeline import (  # noqa: F401 — GRANULARITY / DEFAULT_* are the public contract
     DEFAULT_AZIMUTH, DEFAULT_AZIMUTH_JITTER, DEFAULT_COMPLETE, DEFAULT_CONCEPT_BANK,
     DEFAULT_CONDITION, DEFAULT_FLAT_PAINT, DEFAULT_GRANULARITY, DEFAULT_MERGE,
-    DEFAULT_MIN_AREA_SHARE, DEFAULT_MIRROR, DEFAULT_OCTREE_RESOLUTION, DEFAULT_RADIUS,
+    DEFAULT_FRAGMENT_SHARE, DEFAULT_MIN_AREA_SHARE, DEFAULT_MIRROR, DEFAULT_OCTREE_RESOLUTION, DEFAULT_RADIUS,
     DEFAULT_REDRAWS, DEFAULT_RESOLUTION, DEFAULT_SAM3_THRESHOLD, DEFAULT_SAMPLES,
     DEFAULT_SEED, DEFAULT_TEXTURE_SIZE, DEFAULT_VIEW_AZIMUTHS, DEFAULT_VIEW_ELEVATIONS,
+    DEFAULT_HOLOPART_ROOT, DEFAULT_HOLOPART_WEIGHTS,
     DEFAULT_XPART_ROOT, DEFAULT_XPART_WEIGHTS, GRANULARITY,
     PipelineOptions, add_cli_arguments, check_cli, floors,
 )
-from prompt_specs import normalize_part_specs
+from prompt_specs import normalize_part_specs, split_prompt_entries
 from segment_api import DEFAULT_PY_SAM3, DEFAULT_SAM3, DEFAULT_TRANSFORMS, _run
 
 DEFAULT_CKPT = os.path.join(ROOT, "ckpt", "full_seg.ckpt")
@@ -124,10 +127,14 @@ def segment_parts(
     py_xpart=None,
     xpart_root=DEFAULT_XPART_ROOT,
     xpart_weights=DEFAULT_XPART_WEIGHTS,
+    py_holopart=None,
+    holopart_root=DEFAULT_HOLOPART_ROOT,
+    holopart_weights=DEFAULT_HOLOPART_WEIGHTS,
     octree_resolution=DEFAULT_OCTREE_RESOLUTION,
     seed=DEFAULT_SEED,
     condition=DEFAULT_CONDITION,
     min_area_share=DEFAULT_MIN_AREA_SHARE,
+    fragment_share=DEFAULT_FRAGMENT_SHARE,
     redraws=DEFAULT_REDRAWS,
     reuse=True,
     strict_parts=False,
@@ -138,8 +145,9 @@ def segment_parts(
 
     Args:
         prompts: one entry per output part; join concepts with '+' to merge them into one
-            part, optionally under a name ("body=head+face+hand"). Only `merge="off"`
-            accepts no prompts at all.
+            part, optionally under a name ("body=head+face+hand"). Empty prompts skip
+            naming: each geometric unit is exported and still repaired. The split then
+            uses granularity=fine unless a floor was set.
         samples: how many full_seg samples to intersect. 1 reproduces the old single-sample
             behaviour. What more samples buy is not a finer split but a less lucky one.
             One draw of 5 left Mickey with 13 atoms, the largest covering 48% of the
@@ -165,9 +173,12 @@ def segment_parts(
             stay big enough for a camera to vote on.
         mirror: "auto" also intersects each sample reflected across the model's symmetry
             plane, if it has one -- full_seg often cuts a joint on one side only.
-        merge: "off" stops after the units and writes one node per unit; "name" and "unit"
-            hand over to merge_parts.py (see its `merge`). Guidance overlays are written
-            either way, as long as prompts were given.
+        merge: "off" writes one node per unit; "name", "unit" and "fragments" hand
+            over to merge_parts.py (see its `merge`). Empty prompts force merge="off"
+            unless merge is already "fragments" (keep the split, fold specks only).
+            Guidance overlays are written only when prompts were given.
+        fragment_share: with merge=fragments, a unit below this share of the surface
+            is a speck. Smaller keeps more pieces.
         flat_paint: "auto" gives a model the renders show as grey a temporary flat colour
             before prompting; "off" always prompts on the render as it is.
         view_azimuths / view_elevations / radius / resolution: the grid SAM3 votes over.
@@ -189,8 +200,8 @@ def segment_parts(
 
     if samples < 1:
         raise ValueError(f"samples must be at least 1, got {samples}")
-    if merge != "off" and not prompts:
-        raise ValueError("prompts are required unless merge='off'")
+    merge, granularity = resolve_unprompted(
+        prompts, merge, granularity, min_atom_faces, min_unit_faces)
 
     glb = os.path.abspath(glb)
     out_glb = os.path.abspath(out_glb)
@@ -265,7 +276,8 @@ def segment_parts(
     units_npy = os.path.join(work_dir, "units.npy")
     np.save(units_npy, units)
 
-    if merge != "off":
+    prompted = bool(split_prompt_entries(prompts))
+    if merge != "off" and (prompted or merge != "fragments"):
         return merge_parts(
             glb, prompts, work_dir, out_glb,
             mesh=sample_glbs[0], atoms=atoms_npy,
@@ -276,11 +288,23 @@ def segment_parts(
             py_sam3=py_sam3, sam3_model=sam3_model, sam3_threshold=sam3_threshold,
             concept_bank=concept_bank, flat_paint=flat_paint, units=units,
             complete=complete, py_xpart=py_xpart, xpart_root=xpart_root,
-            xpart_weights=xpart_weights, octree_resolution=octree_resolution, seed=seed,
-            condition=condition, min_area_share=min_area_share, redraws=redraws,
+            xpart_weights=xpart_weights, py_holopart=py_holopart,
+            holopart_root=holopart_root, holopart_weights=holopart_weights,
+            octree_resolution=octree_resolution, seed=seed,
+            condition=condition, min_area_share=min_area_share,
+            fragment_share=fragment_share, redraws=redraws,
             reuse=reuse, strict_parts=strict_parts,
             with_texture=with_texture, texture_size=texture_size,
         )
+
+    if merge == "fragments":
+        from data_toolkit.unit_vote import fold_fragment_units
+
+        units, _, absorbed = fold_fragment_units(
+            units, reference.area_faces, welded_face_adjacency(reference),
+            max_share=fragment_share)
+        print(f"[merge] fragments: share<{fragment_share:g}, absorbed {absorbed} specks -> "
+              f"{int(units.max()) + 1 if len(units) else 0} units kept")
 
     labels_npy = os.path.join(work_dir, "labels.npy")
     names_json = os.path.join(work_dir, "label_names.json")
@@ -290,7 +314,31 @@ def segment_parts(
     manifest = export_labelled(sample_glbs[0], glb, labels_npy, names_json, out_glb,
                                with_texture, texture_size)
     print(f"saved {out_glb} ({len(manifest)} units, unnamed)")
+    complete_parts(glb, out_glb, os.path.join(out_dir, "complete"), complete,
+                   py_xpart, xpart_root, xpart_weights, octree_resolution, seed,
+                   condition, with_texture, texture_size, min_area_share, redraws,
+                   py_holopart, holopart_root, holopart_weights)
     return manifest
+
+
+def resolve_unprompted(prompts, merge, granularity, min_atom_faces=None,
+                       min_unit_faces=None):
+    """No prompts: keep the geometric split and use the finest named floors.
+
+    Language only names. An empty prompt list cannot vote, so `name` / `unit` become
+    `off`. `fragments` stays: it does not need names. The finest preset is `fine`
+    (150/300); an explicit granularity or floor wins.
+    """
+    if split_prompt_entries(prompts):
+        return merge, granularity
+    if merge in ("name", "unit"):
+        print("[split] no prompts; merge=off (one node per geometric unit)")
+        merge = "off"
+    if (min_atom_faces is None and min_unit_faces is None
+            and granularity == DEFAULT_GRANULARITY):
+        print("[split] no prompts; granularity=fine")
+        granularity = "fine"
+    return merge, granularity
 
 
 def main():
@@ -300,8 +348,9 @@ def main():
     )
     parser.add_argument("--glb", required=True, help="Input 3D model")
     parser.add_argument("--prompts", nargs="+", default=[],
-                        help="One entry per output part; join concepts with '+' to merge them, "
-                             "e.g. 'head torso body=arm+hand'. Not needed with --merge off.")
+                        help="One comma-separated sentence: 'head, torso, arm'. "
+                             "Spaces inside a name are kept. '+' still merges concepts "
+                             "('body=head+face'). Empty = unnamed fine units, then repair.")
     parser.add_argument("--out", required=True, help="Output glb, one node per part")
     parser.add_argument("--work_dir", default=None,
                         help="Keep intermediates here. Default: work_parts/ next to --out.")
