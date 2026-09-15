@@ -11,7 +11,10 @@
     GET  /jobs/{id}/complete_raw the solids before the albedo bake
     GET  /jobs/{id}/guidance/{name} one review overlay from work/guidance/
     GET  /jobs/{id}/map      the 2D part map, legacy jobs only
-    GET  /health             stages, switches, current defaults, GPU busy flag
+    GET  /jobs               recent jobs (newest first); use this if the POST timed out
+    GET  /jobs/latest        the newest job, running or finished
+    GET  /jobs/{id}          one job's state, stage, and download links
+    GET  /health             stages, switches, current defaults, GPU busy flag, latest job
 
 Every stage still runs as a subprocess that loads its own model, and the default pipeline
 samples SegviGen several times, so a request costs several minutes and the box has one
@@ -38,6 +41,7 @@ from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BeforeValidator
@@ -60,7 +64,21 @@ JOBS_DIR = os.path.abspath(os.environ.get(
 JOB_ID = re.compile(r"\A[0-9a-f]{32}\Z")
 
 _gpu = threading.Lock()
+_current = {"job_id": None}
 app = FastAPI(title="SegviGen part splitter", version="1", description=__doc__)
+
+# Newest matching file/dir wins. AutoDL may drop the POST before we can reply,
+# so clients recover the job_id from GET /jobs instead of the original response.
+_STAGE_MARKERS = (
+    ("done", ("complete", "xpart_parts.glb")),
+    ("bake", ("complete", "xpart_parts_raw.glb")),
+    ("complete", ("complete", "open_instances.glb")),
+    ("merge", ("parts.glb",)),
+    ("units", ("work", "units.npy")),
+    ("split", ("work", "atoms.glb")),
+    ("guidance", ("work", "guidance")),
+    ("accepted", ("input.glb",)),
+)
 
 # /docs leaves the schema type name in empty optional boxes. Treat those as omitted.
 _FORM_PLACEHOLDERS = ("", "string", "integer", "number", "null")
@@ -95,10 +113,43 @@ def parse_optional_float(value):
 OptionalStr = Annotated[str | None, BeforeValidator(blank_as_none)]
 
 
+def serializable_errors(exc: RequestValidationError) -> list[dict]:
+    """exc.errors() keeps exception objects in ctx; those cannot go into JSON."""
+    errors = jsonable_encoder(exc.errors())
+    for item in errors:
+        loc = item.get("loc") or ()
+        if loc and loc[-1] == "glb" and "UploadFile" in str(item.get("msg", "")):
+            item["msg"] = (
+                "glb must be a file upload (multipart field named glb), not text"
+            )
+            item["input"] = "<omitted>"
+        elif isinstance(item.get("input"), str) and any(
+            ord(ch) < 32 for ch in item["input"][:64]
+        ):
+            item["input"] = "<binary omitted>"
+    return errors
+
+
 @app.exception_handler(RequestValidationError)
 async def _invalid_form(request: Request, exc: RequestValidationError):
-    print(f"{request.method} {request.url.path} 422 {exc.errors()}")
-    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+    detail = serializable_errors(exc)
+    print(f"{request.method} {request.url.path} 422 {detail}")
+    return JSONResponse(status_code=422, content={"detail": detail})
+
+
+def _write_json(path: str, payload: dict) -> None:
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
+def _read_json(path: str):
+    try:
+        with open(path, encoding="utf-8") as file:
+            return json.load(file)
+    except (OSError, json.JSONDecodeError):
+        return None
 
 
 def _job_dir(job_id: str) -> str:
@@ -118,9 +169,109 @@ def _artifact(job_id: str, *relative: str) -> str:
     return path
 
 
+def _iter_job_ids():
+    if not os.path.isdir(JOBS_DIR):
+        return
+    for name in os.listdir(JOBS_DIR):
+        if JOB_ID.match(name) and os.path.isdir(os.path.join(JOBS_DIR, name)):
+            yield name
+
+
+def _latest_job_id():
+    newest = None
+    newest_mtime = -1.0
+    for job_id in _iter_job_ids():
+        mtime = os.path.getmtime(os.path.join(JOBS_DIR, job_id))
+        if mtime > newest_mtime:
+            newest, newest_mtime = job_id, mtime
+    return newest
+
+
+def _infer_stage(path: str) -> str:
+    for stage, relative in _STAGE_MARKERS:
+        full = os.path.join(path, *relative)
+        if os.path.isfile(full) or os.path.isdir(full):
+            return stage
+    return "accepted"
+
+
+def _job_links(job_id: str, path: str) -> dict:
+    base = f"/jobs/{job_id}"
+    mapping = {
+        "download": (f"{base}/download", ("parts.glb",)),
+        "complete": (f"{base}/complete", ("complete", "xpart_parts.glb")),
+        "complete_raw": (f"{base}/complete_raw", ("complete", "xpart_parts_raw.glb")),
+        "complete_decisions": (f"{base}/complete_decisions", ("complete", "decisions.json")),
+        "atoms": (f"{base}/atoms", ("work", "atoms.glb")),
+        "report": (f"{base}/report", ("work", "vote_report.json")),
+    }
+    return {
+        key: href
+        for key, (href, relative) in mapping.items()
+        if os.path.isfile(os.path.join(path, *relative))
+    }
+
+
+def _summarize_job(job_id: str, include_result=False) -> dict:
+    path = os.path.join(JOBS_DIR, job_id)
+    meta = _read_json(os.path.join(path, "job.json")) or {}
+    stage = _infer_stage(path)
+    running = _gpu.locked() and _current["job_id"] == job_id
+    if meta.get("state") == "error":
+        state = "error"
+    elif running:
+        state = "running"
+    elif stage == "done" or os.path.isfile(os.path.join(path, "result.json")):
+        state = "done"
+    elif stage == "accepted" and not meta:
+        state = "incomplete"
+    else:
+        state = "incomplete"
+    summary = {
+        "job_id": job_id,
+        "state": state,
+        "stage": stage,
+        "filename": meta.get("filename"),
+        "started": meta.get("started"),
+        "finished": meta.get("finished"),
+        "error": meta.get("error"),
+        "mtime": os.path.getmtime(path),
+        "links": _job_links(job_id, path),
+    }
+    if include_result:
+        summary["result"] = _read_json(os.path.join(path, "result.json"))
+    return summary
+
+
+def _record_job(job_id: str, filename: str) -> None:
+    _current["job_id"] = job_id
+    payload = {
+        "job_id": job_id,
+        "filename": filename,
+        "started": time.time(),
+        "state": "running",
+    }
+    _write_json(os.path.join(JOBS_DIR, job_id, "job.json"), payload)
+    _write_json(os.path.join(JOBS_DIR, "current.json"), {"job_id": job_id})
+
+
+def _finish_job(job_id: str, *, result=None, error=None) -> None:
+    path = os.path.join(JOBS_DIR, job_id)
+    meta = _read_json(os.path.join(path, "job.json")) or {
+        "job_id": job_id, "started": time.time()}
+    meta["finished"] = time.time()
+    meta["state"] = "error" if error else "done"
+    if error:
+        meta["error"] = error
+    _write_json(os.path.join(path, "job.json"), meta)
+    if result is not None:
+        _write_json(os.path.join(path, "result.json"), result)
+
+
 def _run_job(job_id: str, upload: bytes, filename: str, options: dict, legacy=False) -> dict:
     job = os.path.join(JOBS_DIR, job_id)
     os.makedirs(job, exist_ok=True)
+    _record_job(job_id, filename)
     source = os.path.join(job, "input" + (os.path.splitext(filename)[1] or ".glb"))
     with open(source, "wb") as file:
         file.write(upload)
@@ -132,14 +283,18 @@ def _run_job(job_id: str, upload: bytes, filename: str, options: dict, legacy=Fa
         manifest = run(source, options.pop("prompts"), out_glb,
                        work_dir=os.path.join(job, "work"), **options)
     except ValueError as exc:
+        _finish_job(job_id, error=str(exc))
         raise HTTPException(400, str(exc)) from exc
     except subprocess.CalledProcessError as exc:
         # The stage printed its own traceback to the server log; the client only needs to
         # know which one gave up and that the intermediates are still on disk.
         stage = os.path.basename(exc.cmd[1]) if len(exc.cmd) > 1 else "pipeline"
-        raise HTTPException(
-            500, f"{stage} failed (exit {exc.returncode}); intermediates kept in job {job_id}"
-        ) from exc
+        detail = f"{stage} failed (exit {exc.returncode}); intermediates kept in job {job_id}"
+        _finish_job(job_id, error=detail)
+        raise HTTPException(500, detail) from exc
+    except Exception as exc:
+        _finish_job(job_id, error=str(exc))
+        raise
 
     base = f"/jobs/{job_id}"
     for row in manifest:
@@ -161,6 +316,7 @@ def _run_job(job_id: str, upload: bytes, filename: str, options: dict, legacy=Fa
             "files": [f"{base}/parts/{row['node']}.glb" for row in manifest]
                      if options["parts_output"] == "separate" else [],
         })
+        _finish_job(job_id, result=result)
         return result
     with open(os.path.join(job, "work", "atoms_report.json"), "r", encoding="utf-8") as file:
         atoms = json.load(file)
@@ -184,6 +340,7 @@ def _run_job(job_id: str, upload: bytes, filename: str, options: dict, legacy=Fa
             if name.endswith(".png")
         ] if os.path.isdir(guidance_dir) else [],
     })
+    _finish_job(job_id, result=result)
     return result
 
 
@@ -192,6 +349,8 @@ def health() -> dict:
     return {
         "status": "ok",
         "busy": _gpu.locked(),
+        "current_job": _current["job_id"] if _gpu.locked() else None,
+        "latest_job": _latest_job_id(),
         "jobs_dir": JOBS_DIR,
         "pipeline": "segment_parts",
         "checkpoint": segment_parts.DEFAULT_CKPT,
@@ -206,6 +365,33 @@ def health() -> dict:
             "rank_model": segment_api.DEFAULT_RANK_MODEL,
         },
     }
+
+
+@app.get("/jobs")
+def list_jobs(limit: int = 20) -> dict:
+    """Newest jobs first. Use this when AutoDL dropped the POST and the client lost job_id."""
+    rows = [_summarize_job(job_id) for job_id in _iter_job_ids()]
+    rows.sort(key=lambda row: row["mtime"], reverse=True)
+    return {
+        "busy": _gpu.locked(),
+        "current_job": _current["job_id"] if _gpu.locked() else None,
+        "latest_job": rows[0]["job_id"] if rows else None,
+        "jobs": rows[: max(1, min(limit, 100))],
+    }
+
+
+@app.get("/jobs/latest")
+def latest_job() -> dict:
+    job_id = _current["job_id"] if _gpu.locked() and _current["job_id"] else _latest_job_id()
+    if not job_id:
+        raise HTTPException(404, "no jobs yet")
+    return _summarize_job(job_id, include_result=True)
+
+
+@app.get("/jobs/{job_id}")
+def job_status(job_id: str) -> dict:
+    _job_dir(job_id)
+    return _summarize_job(job_id, include_result=True)
 
 
 @app.post("/segment")

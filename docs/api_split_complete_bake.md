@@ -43,7 +43,7 @@ curl -X POST "$HOST/segment" \
 
 不传 `complete` 就是 `hybrid`。只要拆不要修：`-F "complete=off"`。只要 X-Part：`-F "complete=full"`。
 
-`prompts` 是**一句逗号分隔**的部件名（中文逗号、顿号也行）。名字里可以有空格。`body=head+face` 仍把多个概念收成一个输出节点。不传则默认提示词是 **主体、底座**（`merge` / `granularity` 仍用请求值，默认 `name` / `medium`）。布尔字段按 multipart 传 `true` / `false`。`/docs` 里没填的可选框不要留着灰色的 `string`；服务会把 `string` / 空数字当成没传，否则 FastAPI 会直接 **422**。
+`prompts` 是**一句逗号分隔**的部件名（中文逗号、顿号也行）。名字里可以有空格。`body=head+face` 仍把多个概念收成一个输出节点。不传则默认提示词是 **主体、底座**（`merge` / `granularity` 仍用请求值，默认 `name` / `medium`）。布尔字段按 multipart 传 `true` / `false`。`glb` 必须是文件字段（`curl -F "glb=@model.glb"` 或 `/docs` 里用 Choose File）；当成普通文本提交会 **422**。`/docs` 里没填的可选框不要留着灰色的 `string`；服务会把 `string` / 空数字当成没传。
 
 ### 不写提示词
 
@@ -72,8 +72,11 @@ curl -X POST "$HOST/segment" --max-time 3600 \
 
 | 方法 | 路径 | 内容 |
 |---|---|---|
-| `GET` | `/health` | 六步、开关、默认、GPU 是否占用 |
+| `GET` | `/health` | 六步、开关、默认、GPU 是否占用、`current_job` / `latest_job` |
 | `POST` | `/segment` | 上传 GLB + 选项 → 清单和下载链接 |
+| `GET` | `/jobs` | 最近任务列表（网关超时丢了 `job_id` 时用这个找回） |
+| `GET` | `/jobs/latest` | 最新一单的状态、阶段、下载链接 |
+| `GET` | `/jobs/{id}` | 指定任务的状态（不存在才是真 404） |
 | `GET` | `/jobs/{id}/download` | 开口 `parts.glb` |
 | `GET` | `/jobs/{id}/complete` | 封闭已烘（混合结果） |
 | `GET` | `/jobs/{id}/complete_raw` | 烘焙前的生成实体 |
@@ -82,11 +85,21 @@ curl -X POST "$HOST/segment" --max-time 3600 \
 | `GET` | `/jobs/{id}/report` | 逐单元投票表（没写提示词时没有） |
 | `GET` | `/jobs/{id}/guidance/{name}` | 审阅叠加图 |
 
+AutoDL 自定义服务的网关会掐掉浏览器对 `POST /segment` 的长连接，页面上常显示 **404**。这只是代理断了，**后台任务还在跑**。此时不要重提（会 **409**），用下面接口拿回 `job_id`：
+
+```sh
+curl -sS "$HOST/health"          # busy / current_job / latest_job
+curl -sS "$HOST/jobs/latest"     # 最新一单：state、stage、links
+curl -sS "$HOST/jobs"            # 最近任务列表
+```
+
+`state` 为 `running` / `done` / `error` / `incomplete`。`stage` 是盘上推出来的进度：`accepted` → `guidance` → `split` → `units` → `merge` → `complete` → `bake` → `done`。`done` 之后再下 `links.complete`。
+
 下载：
 
 ```sh
 HOST=https://u1045120-bc7b-28ae0187.westb.seetacloud.com:8443
-JOB=...   # 响应里的 job_id
+JOB=...   # POST 响应或 GET /jobs/latest 里的 job_id
 
 # 开口件（拆分 + 可选命名 + 开口烘焙）
 curl -O "$HOST/jobs/${JOB}/download"

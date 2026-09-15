@@ -437,8 +437,9 @@ curl -X POST http://127.0.0.1:6006/segment \
 
 | 方法 | 路径 | 内容 |
 |---|---|---|
-| `GET` | `/health` | 六步、开关取值、当前默认、GPU 是否占用 |
+| `GET` | `/health` | 六步、开关取值、当前默认、GPU 是否占用、最新任务 |
 | `POST` | `/segment` | 上传 GLB + 选项 → 清单和下载链接 |
+| `GET` | `/jobs`、`/jobs/latest`、`/jobs/{id}` | 找回任务（网关超时后浏览器拿不到 `job_id`） |
 | `POST` | `/segment_legacy` | 旧 2D 引导（`front_view` / `assign` / `split_mode`） |
 | `GET` | `/jobs/{id}/download` | `parts.glb`（开放、已命名的部件） |
 | `GET` | `/jobs/{id}/atoms` | 投票前的过分割原子 |

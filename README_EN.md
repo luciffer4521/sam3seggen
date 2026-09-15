@@ -504,8 +504,9 @@ these links:
 
 | method | path | what |
 |---|---|---|
-| `GET` | `/health` | six stages, switches, current defaults, GPU busy flag |
+| `GET` | `/health` | six stages, switches, current defaults, GPU busy flag, latest job |
 | `POST` | `/segment` | upload a GLB + options → manifest and download links |
+| `GET` | `/jobs`, `/jobs/latest`, `/jobs/{id}` | recover a job after the gateway drops the POST |
 | `POST` | `/segment_legacy` | old 2D route (`front_view` / `assign` / `split_mode`) |
 | `GET` | `/jobs/{id}/download` | `parts.glb` (open, named parts) |
 | `GET` | `/jobs/{id}/atoms` | over-segmented atoms before the vote |
